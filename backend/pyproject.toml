@@ -1,0 +1,5 @@
+[project]
+name = "distributed-task-platform-backend"
+version = "0.1.0"
+description = "Backend for the distributed task execution and workflow platform"
+requires-python = ">=3.11"
