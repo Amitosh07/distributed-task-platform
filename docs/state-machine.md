@@ -12,28 +12,28 @@ CREATED -> QUEUED -> RUNNING -> SUCCESS
     \-----------------> CANCELLED                      [Phase 3+]
 ```
 
-## Phase 2 active transitions
+## Phase 3 active transitions
 
-Phase 2 implements and tests the following transitions. All others are defined
-in the state machine but not yet triggered by application code.
+Phase 3 implements and tests the following transitions under concurrent multi-worker execution. All others are defined in the state machine but not yet triggered by application code.
 
-| Transition | Actor | Persisted change |
-|---|---|---|
-| `CREATED → QUEUED` | API (`create_task`) during task submission | `queued_at`, `status = QUEUED` committed before Redis publish |
-| `QUEUED → RUNNING` | Worker (`_process_task`) on message receipt | `started_at`, `attempt_count += 1`, `status = RUNNING`, committed |
-| `RUNNING → SUCCESS` | Worker after handler returns successfully | `result_summary`, `finished_at`, `status = SUCCESS`, committed |
-| `RUNNING → FAILED` | Worker after handler raises any exception | `error_message`, `finished_at`, `status = FAILED`, committed |
+| Transition | Actor | Persisted change | Concurrency guarantee |
+|---|---|---|---|
+| `CREATED → QUEUED` | API (`create_task`) during task submission | `queued_at`, `status = QUEUED` committed before Redis publish | DB unique constraint on idempotency key prevents duplicate submission |
+| `QUEUED → RUNNING` | Worker (`_atomic_claim`) on message receipt | `started_at`, `attempt_count += 1`, `status = RUNNING`, committed | Conditional `UPDATE ... WHERE status = 'QUEUED'` ensures exactly one worker claims the task |
+| `RUNNING → SUCCESS` | Worker after handler returns successfully | `result_summary`, `finished_at`, `status = SUCCESS`, committed | Committed by the claiming worker |
+| `RUNNING → FAILED` | Worker after handler raises any exception | `error_message`, `finished_at`, `status = FAILED`, committed | Committed by the claiming worker |
 
-### Phase 2 notes
+### Phase 3 notes
 
-- **CREATED is transient in Phase 2**: tasks move directly from `CREATED` to
+- **Atomic claim**: `QUEUED → RUNNING` is guarded by `UPDATE tasks SET status='RUNNING', ... WHERE id=:id AND status='QUEUED'`. If two workers race for the same task ID, exactly one UPDATE succeeds (`rowcount == 1`); the loser gets `rowcount == 0` and skips execution.
+- **CREATED is transient in Phase 3**: tasks move directly from `CREATED` to
   `QUEUED` in a single DB commit during `create_task()`. A client never observes
   a task in `CREATED` status from the API.
 - **No retries**: failed tasks stay `FAILED`. `RETRY_WAIT` and `DEAD_LETTER`
   are Phase 4 features.
-- **No cancellation**: `CANCELLED` is Phase 3+.
+- **No cancellation**: `CANCELLED` is Phase 4+.
 - **No timeouts**: `TIMED_OUT` is Phase 4.
-- **No leases or heartbeats**: Phase 3.
+- **No leases or heartbeats**: Phase 4 scope.
 - **Worker resilience**: the worker loop catches all handler exceptions and
   continues processing the next task after a `FAILED` transition.
 

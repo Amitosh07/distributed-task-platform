@@ -54,11 +54,12 @@ def _submit_task(client, token, project_id, task_type="sleep", payload=None, **k
     return client.post("/v1/tasks", headers=auth_headers(token), json=body)
 
 
-def _run_worker_for_task(task_id_str: str, timeout: float = 5.0) -> None:
+def _run_worker_for_task(task_id_str: str, worker_id: str = "test-worker") -> None:
     """Pull the task from the queue and process it synchronously (test helper)."""
     from uuid import UUID
     from app.workers.runtime import _process_task
-    _process_task(UUID(task_id_str))
+    _process_task(worker_id, UUID(task_id_str))
+
 
 
 def _load_task(task_id: str) -> Task:

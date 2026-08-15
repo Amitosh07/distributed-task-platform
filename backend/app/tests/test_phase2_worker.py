@@ -27,6 +27,8 @@ pytestmark = pytest.mark.skipif(
     reason="requires isolated PostgreSQL and Redis",
 )
 
+_TEST_WORKER_ID = "test-worker"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -100,7 +102,7 @@ class TestWorkerProcessTask:
         _project_id, task_id = _make_project_and_task("sleep", {"seconds": 0.01})
 
         from app.workers.runtime import _process_task
-        _process_task(task_id)
+        _process_task(_TEST_WORKER_ID, task_id)
 
         task = _load_task(task_id)
         assert task.status == TaskStatus.SUCCESS
@@ -115,7 +117,7 @@ class TestWorkerProcessTask:
         _project_id, task_id = _make_project_and_task("sleep", {"seconds": -1})
 
         from app.workers.runtime import _process_task
-        _process_task(task_id)
+        _process_task(_TEST_WORKER_ID, task_id)
 
         task = _load_task(task_id)
         assert task.status == TaskStatus.FAILED
@@ -127,7 +129,7 @@ class TestWorkerProcessTask:
         _project_id, task_id = _make_project_and_task("unknown_type_xyz", {})
 
         from app.workers.runtime import _process_task
-        _process_task(task_id)
+        _process_task(_TEST_WORKER_ID, task_id)
 
         task = _load_task(task_id)
         assert task.status == TaskStatus.FAILED
@@ -139,8 +141,8 @@ class TestWorkerProcessTask:
         _pid, success_id = _make_project_and_task("sleep", {"seconds": 0.01})
 
         from app.workers.runtime import _process_task
-        _process_task(failing_id)   # This should fail
-        _process_task(success_id)   # This should succeed
+        _process_task(_TEST_WORKER_ID, failing_id)   # This should fail
+        _process_task(_TEST_WORKER_ID, success_id)   # This should succeed
 
         failed_task = _load_task(failing_id)
         success_task = _load_task(success_id)
@@ -148,17 +150,17 @@ class TestWorkerProcessTask:
         assert success_task.status == TaskStatus.SUCCESS
 
     def test_skips_task_already_in_terminal_state(self):
-        """Worker skips a task that is already SUCCESS (defensive duplicate check)."""
+        """Worker skips a task that is already SUCCESS (atomic claim returns 0 rows)."""
         _project_id, task_id = _make_project_and_task("sleep", {"seconds": 0.01})
 
         from app.workers.runtime import _process_task
         # First execution → SUCCESS
-        _process_task(task_id)
+        _process_task(_TEST_WORKER_ID, task_id)
         task_after_first = _load_task(task_id)
         assert task_after_first.status == TaskStatus.SUCCESS
 
-        # Second execution → should skip without changing state
-        _process_task(task_id)
+        # Second execution → atomic claim gets 0 rows (status != QUEUED) → skip
+        _process_task(_TEST_WORKER_ID, task_id)
         task_after_second = _load_task(task_id)
         assert task_after_second.status == TaskStatus.SUCCESS
         # attempt_count must not have incremented
@@ -168,8 +170,8 @@ class TestWorkerProcessTask:
         """_process_task silently skips a task ID that does not exist in the DB."""
         from app.workers.runtime import _process_task
         non_existent = uuid4()
-        # Must not raise
-        _process_task(non_existent)
+        # Must not raise — atomic claim returns 0 rows, load returns None
+        _process_task(_TEST_WORKER_ID, non_existent)
 
     def test_csv_stats_task_succeeds(self):
         """csv_stats handler works end-to-end through the worker."""
@@ -177,7 +179,7 @@ class TestWorkerProcessTask:
         _project_id, task_id = _make_project_and_task("csv_stats", {"csv_data": csv_data})
 
         from app.workers.runtime import _process_task
-        _process_task(task_id)
+        _process_task(_TEST_WORKER_ID, task_id)
 
         task = _load_task(task_id)
         assert task.status == TaskStatus.SUCCESS
@@ -193,7 +195,7 @@ class TestWorkerProcessTask:
 
         from app.workers.runtime import _process_task
         for tid in task_ids:
-            _process_task(tid)
+            _process_task(_TEST_WORKER_ID, tid)
 
         for tid in task_ids:
             task = _load_task(tid)

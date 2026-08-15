@@ -1,32 +1,39 @@
 # Distributed Task Execution & Workflow Platform
 
-Phase 2 implements Redis-backed asynchronous task execution with one worker process.
+Phase 3 implements concurrent execution across multiple worker processes.
 Tasks submitted through the API are persisted in PostgreSQL, enqueued in Redis,
-and executed asynchronously by the worker.
+and distributed across concurrent workers that safely claim and execute tasks.
 
-## Architecture (Phase 2)
+## Architecture (Phase 3)
 
 ```
-Client
-  ↓
-FastAPI  ─────────────────────────────────────► PostgreSQL (durable state)
-  │  (persist QUEUED, then publish task ID)          ▲
-  ↓                                                   │
-Redis (task_queue)                                    │
-  │                                                   │
-  ▼                                                   │
-Worker (python -m app.workers.runtime)                │
-  │  (load from PG, execute handler, persist result) ─┘
-  ↓
-RUNNING → SUCCESS / FAILED
+                          ┌────────────────────────────────┐
+                          │ Worker 1 (--worker-id worker-1)│
+                          └──────────────┬─────────────────┘
+                                         │
+Client                                   │
+  ↓                                      │
+FastAPI  ───────────────► PostgreSQL ◄───┼ (atomic claim & result persistence)
+  │ (persist QUEUED,      (source of     │
+  │  then publish ID)      truth)        │
+  ↓                                      │
+Redis (task_queue) ──────────────────────┤
+  (shared dispatch queue)                │
+                                         ▼
+                          ┌────────────────────────────────┐
+                          │ Worker 2 (--worker-id worker-2)│
+                          └────────────────────────────────┘
 ```
 
-PostgreSQL is the authoritative source of truth. Redis is a dispatch queue only.
+PostgreSQL is the authoritative source of truth. Redis is the shared dispatch queue.
+Workers compete for task messages via `BLPOP` and perform an atomic conditional
+`UPDATE tasks SET status='RUNNING' WHERE id=:task_id AND status='QUEUED'`
+claim in PostgreSQL, guaranteeing that only one worker executes each task.
 
 ## Local backend setup
 
 Redis and PostgreSQL are required. Ensure both are running before starting the API
-or the worker.
+or workers.
 
 ```powershell
 cd backend
@@ -77,97 +84,107 @@ uvicorn app.main:app --reload
 
 API is available at `http://127.0.0.1:8000`. Swagger UI at `http://127.0.0.1:8000/docs`.
 
-## Starting the worker
+## Starting multiple workers
 
-Open a second terminal:
+Each worker process is an independent process that consumes from the shared `task_queue`.
+Give each worker a unique `--worker-id`:
 
+**Terminal 2 (Worker 1):**
 ```powershell
 cd backend
 .\.venv\Scripts\Activate.ps1
+python -m app.workers.runtime --worker-id worker-1
+```
+
+**Terminal 3 (Worker 2):**
+```powershell
+cd backend
+.\.venv\Scripts\Activate.ps1
+python -m app.workers.runtime --worker-id worker-2
+```
+
+**Additional workers (optional):**
+```powershell
+python -m app.workers.runtime --worker-id worker-3
+```
+
+You can also specify the worker ID via the `WORKER_ID` environment variable:
+```powershell
+$env:WORKER_ID = "worker-1"
 python -m app.workers.runtime
 ```
 
-The worker will log startup, connect to Redis and PostgreSQL, then wait for tasks.
+## Worker identity and logging
 
-## Submitting a task (manual test)
+All worker log lines include structured key-value pairs showing the worker ID,
+task ID, and lifecycle event:
 
-Using the Swagger UI or curl:
-
-```json
-POST /v1/tasks
-{
-  "project_id": "<your-project-id>",
-  "type": "sleep",
-  "payload": { "seconds": 5 },
-  "priority": "NORMAL",
-  "timeout_seconds": 30,
-  "max_retries": 0
-}
+```text
+2026-08-15T19:00:01 [INFO] worker_id=worker-1 task_id=... event=task_received
+2026-08-15T19:00:01 [INFO] worker_id=worker-1 task_id=... event=task_claimed
+2026-08-15T19:00:01 [INFO] worker_id=worker-1 task_id=... event=task_started type=sleep
+2026-08-15T19:00:06 [INFO] worker_id=worker-1 task_id=... event=task_succeeded
 ```
 
-Response immediately returns the task in `QUEUED` status. Watch the worker terminal
-for `RUNNING` → `SUCCESS`. Poll `GET /v1/tasks/{task_id}` to see the final state.
+If two workers race for the same task, the losing worker logs:
+```text
+2026-08-15T19:00:01 [INFO] worker_id=worker-2 task_id=... event=task_claim_lost task was already claimed by another worker or is not QUEUED
+```
+
+## Concurrency benchmark
+
+Measure real multi-worker speedup:
+
+```powershell
+$env:DATABASE_URL = "postgresql+psycopg://<user>:<password>@localhost:5432/workflow_platform"
+$env:REDIS_URL    = "redis://localhost:6379/0"
+cd backend
+.\.venv\Scripts\python.exe ..\benchmarks\worker_concurrency.py
+```
+
+This runs a fixed batch of 8 sleep tasks (1.0s each) across 1, 2, and 4 workers,
+outputting wall-clock time, throughput, and speedup metrics.
+
+## Submitting tasks (manual multi-worker verification)
+
+Using Swagger UI (`http://127.0.0.1:8000/docs`) or curl:
+
+1. Register + Login to get a JWT.
+2. Create a project (`POST /v1/projects`).
+3. Submit 4 concurrent sleep tasks (`POST /v1/tasks` with `{"type": "sleep", "payload": {"seconds": 5}}`).
+4. Watch both worker terminals process tasks concurrently.
+5. Query PostgreSQL to verify all tasks reach `SUCCESS`:
+
+```sql
+SELECT id,
+       type,
+       status,
+       started_at,
+       finished_at,
+       result_summary
+FROM tasks
+ORDER BY created_at DESC;
+```
 
 ## Supported task types
 
 | Type | Payload | Description |
 |---|---|---|
-| `sleep` | `{"seconds": <0..300>}` | Sleeps for N seconds. Use to demonstrate async execution. |
+| `sleep` | `{"seconds": <0..300>}` | Sleeps for N seconds. Used for demonstrating concurrency. |
 | `csv_stats` | `{"csv_data": "<CSV string>"}` | Returns row count, column count, column names. Max 100 KB. |
 | `image_resize` | `{"image_b64": "<base64>", "width": <int>, "height": <int>}` | Resizes image. Returns metadata. Max 5 MB input, 4096 px per axis. |
 | `http_check` | `{"url": "<https://...>"}` | Checks HTTP reachability. No private IPs. Max 30s timeout. |
 
-## Checking task status in PostgreSQL
-
-```sql
-SELECT id,
-       project_id,
-       type,
-       status,
-       priority,
-       queued_at,
-       started_at,
-       finished_at,
-       result_summary,
-       error_message
-FROM tasks
-ORDER BY created_at DESC;
-```
-
-## Health endpoints
-
-- `GET /health/live` — liveness (always ok if the process is running)
-- `GET /health/ready` — readiness (requires PostgreSQL + Redis)
-
-## Tests
-
-Tests require a dedicated PostgreSQL database (`workflow_platform_test`) and Redis
-DB 1. They will never modify the development database or Redis DB 0.
+## Running tests
 
 ```powershell
-$env:TEST_DATABASE_URL = "postgresql+psycopg://<user>:<pass>@localhost:5432/workflow_platform_test"
+$env:TEST_DATABASE_URL = "postgresql+psycopg://<user>:<password>@localhost:5432/workflow_platform_test"
 $env:TEST_REDIS_URL    = "redis://localhost:6379/1"
 cd backend
 .\.venv\Scripts\pytest.exe -v
 ```
 
-## API endpoints
-
-### Auth
-- `POST /v1/auth/register`, `POST /v1/auth/login`, `GET /v1/auth/me`
-
-### Projects
-- `POST /v1/projects`, `GET /v1/projects`, `GET /v1/projects/{project_id}`
-
-### Tasks
-- `POST /v1/tasks` — submit task (returns `QUEUED` immediately)
-- `GET /v1/tasks` — list with filtering and pagination
-- `GET /v1/tasks/{task_id}` — get task state
-
-### Health
-- `GET /health/live`, `GET /health/ready`
-
 ---
 
-Redis, multiple workers, heartbeats, retries, workflows, the React dashboard,
+Heartbeats, worker leases, retries, workflows, the React dashboard,
 observability, Docker services, and deployment remain planned future phases.
