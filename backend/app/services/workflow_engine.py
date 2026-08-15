@@ -528,3 +528,47 @@ def get_workflow_run(db: Session, owner: User, workflow_id: UUID, run_id: UUID) 
         raise APIError(status_code=404, code="not_found", message="Workflow Run not found")
 
     return run
+
+
+def list_workflows(db: Session, owner: User, project_id: UUID | None = None) -> list[Workflow]:
+    """List workflow definitions visible to the owner, with graph data for the UI."""
+    query = (
+        select(Workflow)
+        .options(joinedload(Workflow.nodes), joinedload(Workflow.edges))
+        .join(Workflow.project)
+        .where(Workflow.project.has(owner_id=owner.id))
+        .order_by(Workflow.created_at.desc())
+    )
+    if project_id is not None:
+        get_owned_project(db, owner, project_id)
+        query = query.where(Workflow.project_id == project_id)
+    return list(db.scalars(query).unique().all())
+
+
+def list_workflow_runs(db: Session, owner: User, workflow_id: UUID, limit: int = 20) -> list[WorkflowRun]:
+    """List recent runs for an owned workflow without changing execution state."""
+    workflow = db.get(Workflow, workflow_id)
+    if not workflow:
+        raise APIError(status_code=404, code="not_found", message="Workflow not found")
+    get_owned_project(db, owner, workflow.project_id)
+    return list(
+        db.scalars(
+            select(WorkflowRun)
+            .where(WorkflowRun.workflow_id == workflow_id)
+            .order_by(WorkflowRun.started_at.desc())
+            .limit(limit)
+        ).all()
+    )
+
+
+def get_workflow(db: Session, owner: User, workflow_id: UUID) -> Workflow:
+    """Return one owned definition with its nodes and edges for a read-only graph."""
+    workflow = db.scalar(
+        select(Workflow)
+        .options(joinedload(Workflow.nodes), joinedload(Workflow.edges))
+        .where(Workflow.id == workflow_id)
+    )
+    if not workflow:
+        raise APIError(status_code=404, code="not_found", message="Workflow not found")
+    get_owned_project(db, owner, workflow.project_id)
+    return workflow

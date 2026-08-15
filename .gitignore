@@ -18,6 +18,8 @@ htmlcov/
 # Build / packaging
 build/
 dist/
+*.tsbuildinfo
+.vite/
 *.egg-info/
 *.egg/
 

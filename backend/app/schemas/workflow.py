@@ -46,6 +46,24 @@ class WorkflowResponse(BaseModel):
     edges: list[WorkflowEdgeResponse]
     created_at: datetime
 
+
+class WorkflowListResponse(BaseModel):
+    items: list[WorkflowResponse]
+
+
+class WorkflowRunListItemResponse(BaseModel):
+    id: UUID
+    workflow_id: UUID
+    status: str
+    failure_policy: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error_message: str | None = None
+
+
+class WorkflowRunListResponse(BaseModel):
+    items: list[WorkflowRunListItemResponse]
+
 class WorkflowRunNodeResponse(BaseModel):
     node_key: str
     status: str
