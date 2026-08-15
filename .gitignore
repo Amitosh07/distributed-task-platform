@@ -33,6 +33,9 @@ out/
 .env.*
 !.env.example
 
+# Local PostgreSQL volumes
+postgres-data/
+
 # IDE / editor
 .vscode/
 .idea/
