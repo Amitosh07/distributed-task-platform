@@ -4,7 +4,7 @@
 
 The platform is initially a modular monolith: one FastAPI application owns the HTTP/API and domain rules, with separately running worker processes for asynchronous execution. PostgreSQL is the authoritative durable source of truth; Redis is the fast queue and coordination layer. A React dashboard calls the API and never coordinates workers directly.
 
-**Phase 3 (current):** Multiple independent worker processes consuming from a shared Redis `task_queue`; atomic task claim via conditional PostgreSQL update; four safe handlers; no heartbeats, leases, or retries yet.
+**Phase 4 (current):** Multiple independent worker processes with active registration and heartbeats; task leases with periodic renewal; execution timeout enforcement; retry policies with exponential backoff; concurrency-safe stale task recovery.
 
 ```text
 Browser
@@ -24,7 +24,7 @@ PostgreSQL <--------------------> Redis                     |
                          |            |            |         |
                          v            v            v         |
                       Worker 1     Worker 2     Worker N -----+
-                         |            |            |
+                         | (heartbeats & leases)   |
                          +------------+------------+
                                       |
                                       v
@@ -45,7 +45,7 @@ Grafana visualizes those metrics. OpenTelemetry correlates requests and work.
 | PostgreSQL | Transactional, durable record of users, projects, tasks, attempts, events, workers, leases, workflows, and runs. It is used to recover or reconcile queue state. |
 | Redis | Low-latency dispatch queues, short-lived coordination, and temporary scheduling/claim signals. It never replaces durable task state. |
 | Scheduler | Future design component that finds due `scheduled_at` tasks and makes them queueable; recurring schedules are out of V1 scope. |
-| Worker runtime | Independently running processes that register, claim work, execute a permitted handler, report durable outcomes, heartbeat, and renew leases. |
+| Worker runtime | Independently running processes that register, claim work with leases, execute with timeouts, renew leases, report heartbeats, retry failures with backoff, and recover stale work. |
 | Workflow engine | Validates DAG definitions, determines ready nodes from persisted dependencies, and creates/coordinates task work for workflow runs. |
 | Prometheus | Scrapes reproducible metrics from API and workers; no performance values are invented. |
 | Grafana | Displays operational and benchmark dashboards using Prometheus data. |
@@ -54,7 +54,7 @@ Grafana visualizes those metrics. OpenTelemetry correlates requests and work.
 
 ## 3. Data flow and task submission
 
-### Phase 3 pipeline
+### Phase 4 pipeline
 
 ```text
 Client → POST /v1/tasks
@@ -66,36 +66,33 @@ PostgreSQL: persist task (status = QUEUED, queued_at = now)
 Redis: RPUSH task_queue {"task_id": "<UUID>"}
   ↓ (API returns immediately — response does not wait for execution)
 Workers (N processes running python -m app.workers.runtime --worker-id worker-N):
-  BLPOP task_queue (all workers consume from the shared queue)
-  ↓
-  Atomic DB claim:
-    UPDATE tasks SET status='RUNNING', started_at=now, attempt_count=attempt_count+1
-    WHERE id=:task_id AND status='QUEUED'
-  ↓
-  If rowcount == 0: another worker won the race (or task not QUEUED) → skip
-  If rowcount == 1: this worker claimed the task:
-    Commit claim transaction
-    Load task type and payload from PostgreSQL
-    Dispatch to registered handler (HANDLERS registry)
-    On success: result_summary, RUNNING → SUCCESS, finished_at, commit
-    On failure: error_message, RUNNING → FAILED, finished_at, commit
-  ↓
-  Loop — worker never exits on task failure
+  1. Register in PostgreSQL as ACTIVE and maintain periodic heartbeats via background thread.
+  2. Consume from shared task_queue via BLPOP.
+  3. Atomic DB claim with expiring lease:
+       UPDATE tasks SET status='RUNNING', worker_id=:worker_id, lease_acquired_at=now,
+                        lease_expires_at=now + lease_duration, attempt_count=attempt_count+1
+       WHERE id=:task_id AND status='QUEUED'
+  4. While executing handler, background thread periodically renews lease.
+  5. Handler executes inside bounded thread pool with timeout enforcement (timeout_seconds).
+  6. Outcome handling:
+       - Success: RUNNING → SUCCESS (only if worker_id still matches, guarding against late completion after recovery).
+       - Retryable Error / Timeout (attempts <= max_retries): calculate exponential backoff, requeue in PostgreSQL as QUEUED, re-publish to Redis.
+       - Non-Retryable Error / Retries Exhausted: RUNNING → FAILED.
+  7. Background maintenance scanner detects stale tasks (RUNNING with expired leases) and recovers them back to QUEUED.
 ```
 
 The API validates the task type, handler payload, project access, priority, timeout, scheduling, retry policy, and idempotency key. It persists the task before publishing its ID to Redis. A client receives a task ID rather than waiting for execution.
 
-### Database/Redis consistency and reconciliation (Phase 3)
+### Database/Redis consistency and reconciliation (Phase 4)
 
-The durability boundary is PostgreSQL. Phase 3 builds upon ADR-007 and ADR-008:
+The durability boundary is PostgreSQL (ADR-001, ADR-007, ADR-008, ADR-009):
 
 1. Task is persisted in PostgreSQL as `QUEUED` in a committed transaction.
 2. Task ID is then published to Redis.
-3. If Redis publish fails after the DB commit, the task remains durably `QUEUED` in PostgreSQL. A warning is logged. The task is recoverable; a future reconciler (Phase 4) will re-enqueue stranded `QUEUED` tasks.
-4. Workers always load the authoritative task state from PostgreSQL and perform an atomic `WHERE status = 'QUEUED'` update before executing — they never execute based solely on the Redis message.
-5. If two workers receive the same task ID (e.g. duplicate message), only the one that executes the atomic UPDATE successfully will run the handler; the other skips execution.
+3. If Redis publish fails after the DB commit, the task remains durably `QUEUED` in PostgreSQL.
+4. If a worker crashes or drops off during execution, its lease expires (`lease_expires_at < now`). The background recovery service detects the stale task, resets it to `QUEUED`, and re-enqueues it on Redis.
+5. All task state transitions are conditional on `status` and `worker_id`, guaranteeing concurrency safety across racing workers and recovery scanners.
 
-The full transactional outbox pattern is deferred to Phase 4. At-least-once delivery plus idempotency is the declared architecture (ADR-003).
 
 ## 4. Execution, registration, heartbeat, and recovery flows
 

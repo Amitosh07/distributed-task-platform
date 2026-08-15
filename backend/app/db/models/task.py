@@ -50,6 +50,7 @@ class Task(Base):
         Index("ix_tasks_project_status", "project_id", "status"),
         Index("ix_tasks_status_priority_created", "status", "priority", "created_at"),
         Index("ix_tasks_scheduled_at", "scheduled_at"),
+        Index("ix_tasks_status_lease_expires", "status", "lease_expires_at"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -63,6 +64,10 @@ class Task(Base):
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=300)
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    worker_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    lease_acquired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -71,3 +76,4 @@ class Task(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     project: Mapped["Project"] = relationship(back_populates="tasks")
+

@@ -6,14 +6,16 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
-from app.api.routes import auth, health, projects, tasks
+from app.api.routes import auth, health, projects, tasks, workers
 from app.services.errors import APIError
 
 app = FastAPI(title="Distributed Task Execution & Workflow Platform", version="0.1.0")
 app.include_router(auth.router)
 app.include_router(projects.router)
 app.include_router(tasks.router)
+app.include_router(workers.router)
 app.include_router(health.router)
+
 
 
 @app.exception_handler(APIError)

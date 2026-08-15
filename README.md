@@ -1,34 +1,38 @@
 # Distributed Task Execution & Workflow Platform
 
-Phase 3 implements concurrent execution across multiple worker processes.
-Tasks submitted through the API are persisted in PostgreSQL, enqueued in Redis,
-and distributed across concurrent workers that safely claim and execute tasks.
+Phase 4 implements reliable worker/task execution: worker heartbeats, task leases,
+execution timeouts, exponential backoff retries, and concurrency-safe stale task recovery.
 
-## Architecture (Phase 3)
+## Architecture (Phase 4)
 
 ```
-                          ┌────────────────────────────────┐
-                          │ Worker 1 (--worker-id worker-1)│
-                          └──────────────┬─────────────────┘
+                          ┌────────────────────────────────────┐
+                          │   Worker 1 (--worker-id worker-1)  │
+                          │   - Heartbeats to PostgreSQL       │
+                          │   - Renews active task lease       │
+                          └──────────────┬─────────────────────┘
                                          │
 Client                                   │
   ↓                                      │
-FastAPI  ───────────────► PostgreSQL ◄───┼ (atomic claim & result persistence)
+FastAPI  ───────────────► PostgreSQL ◄───┼ (atomic claim, leases, recovery)
   │ (persist QUEUED,      (source of     │
   │  then publish ID)      truth)        │
   ↓                                      │
 Redis (task_queue) ──────────────────────┤
   (shared dispatch queue)                │
                                          ▼
-                          ┌────────────────────────────────┐
-                          │ Worker 2 (--worker-id worker-2)│
-                          └────────────────────────────────┘
+                          ┌────────────────────────────────────┐
+                          │   Worker 2 (--worker-id worker-2)  │
+                          │   - Heartbeats to PostgreSQL       │
+                          │   - Recovers expired stale tasks   │
+                          └────────────────────────────────────┘
 ```
 
 PostgreSQL is the authoritative source of truth. Redis is the shared dispatch queue.
-Workers compete for task messages via `BLPOP` and perform an atomic conditional
-`UPDATE tasks SET status='RUNNING' WHERE id=:task_id AND status='QUEUED'`
-claim in PostgreSQL, guaranteeing that only one worker executes each task.
+Workers compete for task messages via `BLPOP` and perform an atomic claim that sets
+an expiring lease (`lease_expires_at`). The worker renews this lease while running the task.
+If a worker crashes, its lease expires; any healthy worker automatically recovers the task,
+resets it to `QUEUED`, and re-enqueues it on Redis.
 
 ## Local backend setup
 
@@ -57,6 +61,19 @@ Required environment variables:
 | `ENVIRONMENT` | `development` or `test` |
 | `REDIS_URL` | Redis connection string. Default: `redis://localhost:6379/0` |
 
+### Phase 4 Reliability Configuration (Optional Overrides)
+
+| Variable | Default | Description |
+|---|---|---|
+| `HEARTBEAT_INTERVAL_SECONDS` | `2.0` | Frequency of worker heartbeats |
+| `WORKER_STALE_THRESHOLD_SECONDS` | `10.0` | Duration after which inactive workers are marked `STALE` |
+| `TASK_LEASE_SECONDS` | `10.0` | Initial duration and renewal extension for task leases |
+| `RECOVERY_INTERVAL_SECONDS` | `5.0` | Frequency of background stale task and worker recovery |
+| `DEFAULT_TASK_TIMEOUT_SECONDS` | `300` | Default execution timeout in seconds per task |
+| `DEFAULT_MAX_RETRIES` | `3` | Default additional retry attempts for retryable failures |
+| `RETRY_BACKOFF_BASE_SECONDS` | `1.0` | Base delay for exponential backoff (`base * 2^(attempt-1)`) |
+| `RETRY_BACKOFF_MAX_SECONDS` | `60.0` | Maximum cap for retry backoff delay |
+
 ## Redis setup (WSL2)
 
 Redis runs inside WSL2 Ubuntu. Start it with:
@@ -84,10 +101,10 @@ uvicorn app.main:app --reload
 
 API is available at `http://127.0.0.1:8000`. Swagger UI at `http://127.0.0.1:8000/docs`.
 
-## Starting multiple workers
+## Starting workers
 
-Each worker process is an independent process that consumes from the shared `task_queue`.
-Give each worker a unique `--worker-id`:
+Each worker process is an independent process that registers in PostgreSQL and consumes
+from the shared `task_queue`. Give each worker a unique `--worker-id`:
 
 **Terminal 2 (Worker 1):**
 ```powershell
@@ -103,62 +120,21 @@ cd backend
 python -m app.workers.runtime --worker-id worker-2
 ```
 
-**Additional workers (optional):**
-```powershell
-python -m app.workers.runtime --worker-id worker-3
-```
+## Worker failure & recovery simulation (manual test)
 
-You can also specify the worker ID via the `WORKER_ID` environment variable:
-```powershell
-$env:WORKER_ID = "worker-1"
-python -m app.workers.runtime
-```
-
-## Worker identity and logging
-
-All worker log lines include structured key-value pairs showing the worker ID,
-task ID, and lifecycle event:
-
-```text
-2026-08-15T19:00:01 [INFO] worker_id=worker-1 task_id=... event=task_received
-2026-08-15T19:00:01 [INFO] worker_id=worker-1 task_id=... event=task_claimed
-2026-08-15T19:00:01 [INFO] worker_id=worker-1 task_id=... event=task_started type=sleep
-2026-08-15T19:00:06 [INFO] worker_id=worker-1 task_id=... event=task_succeeded
-```
-
-If two workers race for the same task, the losing worker logs:
-```text
-2026-08-15T19:00:01 [INFO] worker_id=worker-2 task_id=... event=task_claim_lost task was already claimed by another worker or is not QUEUED
-```
-
-## Concurrency benchmark
-
-Measure real multi-worker speedup:
-
-```powershell
-$env:DATABASE_URL = "postgresql+psycopg://<user>:<password>@localhost:5432/workflow_platform"
-$env:REDIS_URL    = "redis://localhost:6379/0"
-cd backend
-.\.venv\Scripts\python.exe ..\benchmarks\worker_concurrency.py
-```
-
-This runs a fixed batch of 8 sleep tasks (1.0s each) across 1, 2, and 4 workers,
-outputting wall-clock time, throughput, and speedup metrics.
-
-## Submitting tasks (manual multi-worker verification)
-
-Using Swagger UI (`http://127.0.0.1:8000/docs`) or curl:
-
-1. Register + Login to get a JWT.
-2. Create a project (`POST /v1/projects`).
-3. Submit 4 concurrent sleep tasks (`POST /v1/tasks` with `{"type": "sleep", "payload": {"seconds": 5}}`).
-4. Watch both worker terminals process tasks concurrently.
-5. Query PostgreSQL to verify all tasks reach `SUCCESS`:
+1. Start `worker-1` and `worker-2` in separate terminals.
+2. Submit a 15-second sleep task (`POST /v1/tasks` with `{"type": "sleep", "payload": {"seconds": 15}}`).
+3. Note in the terminal that `worker-1` claims the task and starts heartbeating.
+4. Kill `worker-1` (press Ctrl+C or terminate terminal).
+5. Watch `worker-2` logs: as soon as `worker-1`'s lease expires, `worker-2`'s background recovery scanner detects the stale task, resets it to `QUEUED`, re-enqueues it to Redis, claims it, and executes it to `SUCCESS`.
+6. Query PostgreSQL to inspect task attempts and state:
 
 ```sql
 SELECT id,
        type,
        status,
+       worker_id,
+       attempt_count,
        started_at,
        finished_at,
        result_summary
@@ -166,16 +142,22 @@ FROM tasks
 ORDER BY created_at DESC;
 ```
 
-## Supported task types
+## Checking worker health
 
-| Type | Payload | Description |
-|---|---|---|
-| `sleep` | `{"seconds": <0..300>}` | Sleeps for N seconds. Used for demonstrating concurrency. |
-| `csv_stats` | `{"csv_data": "<CSV string>"}` | Returns row count, column count, column names. Max 100 KB. |
-| `image_resize` | `{"image_b64": "<base64>", "width": <int>, "height": <int>}` | Resizes image. Returns metadata. Max 5 MB input, 4096 px per axis. |
-| `http_check` | `{"url": "<https://...>"}` | Checks HTTP reachability. No private IPs. Max 30s timeout. |
+Inspect registered workers and heartbeats via API:
+- `GET /v1/workers` (requires Authorization bearer token)
+
+Or query PostgreSQL directly:
+```sql
+SELECT id, hostname, status, started_at, last_heartbeat_at, stopped_at
+FROM workers
+ORDER BY started_at DESC;
+```
 
 ## Running tests
+
+Tests require a dedicated PostgreSQL database (`workflow_platform_test`) and Redis DB 1.
+They will never touch the development database or Redis DB 0.
 
 ```powershell
 $env:TEST_DATABASE_URL = "postgresql+psycopg://<user>:<password>@localhost:5432/workflow_platform_test"
@@ -186,5 +168,5 @@ cd backend
 
 ---
 
-Heartbeats, worker leases, retries, workflows, the React dashboard,
-observability, Docker services, and deployment remain planned future phases.
+Workflows (DAGs), the React dashboard, Prometheus/Grafana metrics, OpenTelemetry tracing,
+Docker Compose packaging, and cloud deployment remain planned future phases.

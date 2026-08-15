@@ -12,30 +12,27 @@ CREATED -> QUEUED -> RUNNING -> SUCCESS
     \-----------------> CANCELLED                      [Phase 3+]
 ```
 
-## Phase 3 active transitions
+## Phase 4 active transitions
 
-Phase 3 implements and tests the following transitions under concurrent multi-worker execution. All others are defined in the state machine but not yet triggered by application code.
+Phase 4 implements and validates full reliability lifecycle transitions with leases, retries, timeouts, and stale task recovery.
 
-| Transition | Actor | Persisted change | Concurrency guarantee |
+| Transition | Actor | Persisted change | Concurrency & Reliability guarantee |
 |---|---|---|---|
-| `CREATED → QUEUED` | API (`create_task`) during task submission | `queued_at`, `status = QUEUED` committed before Redis publish | DB unique constraint on idempotency key prevents duplicate submission |
-| `QUEUED → RUNNING` | Worker (`_atomic_claim`) on message receipt | `started_at`, `attempt_count += 1`, `status = RUNNING`, committed | Conditional `UPDATE ... WHERE status = 'QUEUED'` ensures exactly one worker claims the task |
-| `RUNNING → SUCCESS` | Worker after handler returns successfully | `result_summary`, `finished_at`, `status = SUCCESS`, committed | Committed by the claiming worker |
-| `RUNNING → FAILED` | Worker after handler raises any exception | `error_message`, `finished_at`, `status = FAILED`, committed | Committed by the claiming worker |
+| `CREATED → QUEUED` | API (`create_task`) during submission | `queued_at`, `status = QUEUED` committed before Redis publish | DB unique constraint on idempotency key prevents duplicate submission |
+| `QUEUED → RUNNING` | Worker (`_atomic_claim`) on message receipt | `started_at`, `worker_id`, `lease_acquired_at`, `lease_expires_at`, `attempt_count += 1`, `status = RUNNING` | Conditional `UPDATE ... WHERE status = 'QUEUED'` guarantees single claimant and issues expiring lease |
+| `RUNNING → SUCCESS` | Worker after handler completes | `result_summary`, `finished_at`, `status = SUCCESS`, committed | Guarded by `WHERE worker_id = :worker_id`; late completion after recovery is safely ignored |
+| `RUNNING → QUEUED` (Retry / Requeue) | Worker on retryable error or timeout (attempts <= max_retries) | `status = QUEUED`, clears `worker_id` and lease fields, sets `error_message`, re-publishes to Redis | Bounded exponential backoff applied before re-enqueueing |
+| `RUNNING → QUEUED` (Stale Recovery) | Background recovery scanner when `lease_expires_at < now` (attempts <= max_retries) | `status = QUEUED`, clears `worker_id` and lease fields, sets recovery error, re-publishes to Redis | Atomic conditional update `WHERE status='RUNNING' AND lease_expires_at < :now` |
+| `RUNNING → FAILED` | Worker on non-retryable error or exhausted retries; or recovery when retries exhausted | `error_message`, `finished_at`, `status = FAILED` | Terminal failure state persisted in PostgreSQL |
 
-### Phase 3 notes
+### Phase 4 notes
 
-- **Atomic claim**: `QUEUED → RUNNING` is guarded by `UPDATE tasks SET status='RUNNING', ... WHERE id=:id AND status='QUEUED'`. If two workers race for the same task ID, exactly one UPDATE succeeds (`rowcount == 1`); the loser gets `rowcount == 0` and skips execution.
-- **CREATED is transient in Phase 3**: tasks move directly from `CREATED` to
-  `QUEUED` in a single DB commit during `create_task()`. A client never observes
-  a task in `CREATED` status from the API.
-- **No retries**: failed tasks stay `FAILED`. `RETRY_WAIT` and `DEAD_LETTER`
-  are Phase 4 features.
-- **No cancellation**: `CANCELLED` is Phase 4+.
-- **No timeouts**: `TIMED_OUT` is Phase 4.
-- **No leases or heartbeats**: Phase 4 scope.
-- **Worker resilience**: the worker loop catches all handler exceptions and
-  continues processing the next task after a `FAILED` transition.
+- **Task Leases**: Every claimed task holds an expiring lease (`lease_expires_at`). The owning worker renews this lease periodically via a background thread while executing the handler.
+- **Task Timeouts**: Handlers execute with timeout enforcement (`timeout_seconds`). Exceeding timeout raises `TaskTimeoutError` and enters the retry path without crashing the worker process.
+- **Worker Crash Recovery**: If a worker abruptly crashes, its lease expires, and any healthy worker automatically recovers the task, resets it to `QUEUED`, and re-enqueues it on Redis.
+- **At-least-once Delivery**: Handlers should remain idempotent where external side effects occur.
+- **No cancellation**: `CANCELLED` is Phase 5+.
+
 
 ## Queue wait versus execution time
 

@@ -16,7 +16,21 @@ class Settings(BaseSettings):
     environment: str = "development"
     redis_url: str = Field(default="redis://localhost:6379/0")
 
+    # Phase 4 — Heartbeats, Leases, Timeouts, Retries & Recovery
+    heartbeat_interval_seconds: float = Field(default=2.0, gt=0)
+    worker_stale_threshold_seconds: float = Field(default=10.0, gt=0)
+    task_lease_seconds: float = Field(default=10.0, gt=0)
+    task_lease_renew_interval_seconds: float = Field(default=3.0, gt=0)
+    recovery_interval_seconds: float = Field(default=5.0, gt=0)
+    default_task_timeout_seconds: int = Field(default=300, ge=1, le=86400)
+    max_task_timeout_seconds: int = Field(default=86400, ge=1)
+    default_max_retries: int = Field(default=3, ge=0)
+    max_retries_limit: int = Field(default=20, ge=0)
+    retry_backoff_base_seconds: float = Field(default=1.0, ge=0)
+    retry_backoff_max_seconds: float = Field(default=60.0, ge=0)
+
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+

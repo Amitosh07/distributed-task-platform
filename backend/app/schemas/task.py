@@ -38,12 +38,15 @@ class TaskResponse(BaseModel):
     timeout_seconds: int
     max_retries: int
     attempt_count: int
+    worker_id: str | None = None
+    lease_expires_at: datetime | None = None
     created_at: datetime
     queued_at: datetime | None
     started_at: datetime | None
     finished_at: datetime | None
     result_summary: dict[str, Any] | None
     error_message: str | None
+
 
 
 class TaskListResponse(BaseModel):
