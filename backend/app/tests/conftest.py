@@ -50,7 +50,7 @@ def clear_database(migrated_database):
     from app.db.database import engine
 
     with engine.begin() as connection:
-        connection.execute(text("TRUNCATE TABLE tasks, projects, users, workers RESTART IDENTITY CASCADE"))
+        connection.execute(text("TRUNCATE TABLE workflow_run_nodes, workflow_runs, workflow_edges, workflow_nodes, workflows, tasks, projects, users, workers RESTART IDENTITY CASCADE"))
     yield
 
 

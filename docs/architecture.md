@@ -4,7 +4,7 @@
 
 The platform is initially a modular monolith: one FastAPI application owns the HTTP/API and domain rules, with separately running worker processes for asynchronous execution. PostgreSQL is the authoritative durable source of truth; Redis is the fast queue and coordination layer. A React dashboard calls the API and never coordinates workers directly.
 
-**Phase 4 (current):** Multiple independent worker processes with active registration and heartbeats; task leases with periodic renewal; execution timeout enforcement; retry policies with exponential backoff; concurrency-safe stale task recovery.
+**Phase 5 (current):** Directed Acyclic Graph (DAG) workflow engine; reusable workflow definitions with Kahn's algorithm cycle detection; parallel branch execution across multiple workers; atomic duplicate-dispatch prevention; fail-fast and continue failure policies; run node state isolation via `workflow_run_nodes`.
 
 ```text
 Browser
@@ -15,7 +15,10 @@ React Dashboard
   v
 FastAPI API -------------------------------------------------+
   |                                                         |
-  | authentication, validation, task/workflow/worker APIs  |
+  | authentication, validation, workflows, tasks, workers   |
+  v                                                         |
+Workflow Engine                                             |
+  | (DAG validation, dependencies, ready node dispatch)     |
   v                                                         |
 PostgreSQL <--------------------> Redis                     |
 (durable state and history)       (queue and coordination)  |
@@ -29,6 +32,13 @@ PostgreSQL <--------------------> Redis                     |
                                       |
                                       v
                                Task execution
+                                      |
+                                      v
+                         _try_advance_workflow hook
+                                      |
+                                      v
+                         Dependency evaluation loop
+```
 
 Prometheus collects metrics from the API, Redis integration, and workers.
 Grafana visualizes those metrics. OpenTelemetry correlates requests and work.
@@ -42,11 +52,11 @@ Grafana visualizes those metrics. OpenTelemetry correlates requests and work.
 |---|---|
 | React frontend | Authenticated dashboard for task, workflow, worker, log, and health visibility. It makes asynchronous work understandable to operators and clients. |
 | FastAPI API | Authentication, project authorization, input validation, durable submission, monitoring, workflow definition/execution, and worker-management contracts. |
-| PostgreSQL | Transactional, durable record of users, projects, tasks, attempts, events, workers, leases, workflows, and runs. It is used to recover or reconcile queue state. |
+| PostgreSQL | Transactional, durable record of users, projects, tasks, attempts, events, workers, leases, workflows, nodes, edges, runs, and run nodes. It is used to recover or reconcile queue state. |
 | Redis | Low-latency dispatch queues, short-lived coordination, and temporary scheduling/claim signals. It never replaces durable task state. |
 | Scheduler | Future design component that finds due `scheduled_at` tasks and makes them queueable; recurring schedules are out of V1 scope. |
 | Worker runtime | Independently running processes that register, claim work with leases, execute with timeouts, renew leases, report heartbeats, retry failures with backoff, and recover stale work. |
-| Workflow engine | Validates DAG definitions, determines ready nodes from persisted dependencies, and creates/coordinates task work for workflow runs. |
+| Workflow engine | Validates DAG definitions (Kahn's algorithm), determines ready nodes from persisted dependencies, creates/dispatches task work via Redis, evaluates failure policies (FAIL_FAST / CONTINUE), and orchestrates multi-step pipelines. |
 | Prometheus | Scrapes reproducible metrics from API and workers; no performance values are invented. |
 | Grafana | Displays operational and benchmark dashboards using Prometheus data. |
 | OpenTelemetry | Carries trace context from API request through dispatch and worker execution; structured logs include correlation IDs. |
@@ -54,38 +64,44 @@ Grafana visualizes those metrics. OpenTelemetry correlates requests and work.
 
 ## 3. Data flow and task submission
 
-### Phase 4 pipeline
+### Phase 5 workflow pipeline
 
 ```text
-Client → POST /v1/tasks
+Client → POST /v1/workflows (Define DAG)
   ↓
-FastAPI: validate request, authenticate, check project access
+FastAPI: authenticate, check project access
   ↓
-PostgreSQL: persist task (status = QUEUED, queued_at = now)
+Workflow Engine: Kahn's algorithm cycle detection & schema validation
   ↓
+PostgreSQL: persist workflows, workflow_nodes, workflow_edges
+  ↓
+Client → POST /v1/workflows/{id}/run (Trigger Run)
+  ↓
+Workflow Engine: instantiate workflow_run and workflow_run_nodes (PENDING)
+  ↓
+Workflow Engine: identify root nodes (no incoming edges)
+  ↓
+Atomic Claim: UPDATE workflow_run_nodes SET status='RUNNING' WHERE status='PENDING'
+  ↓ (If claimed: create Task row in PostgreSQL with status=QUEUED)
 Redis: RPUSH task_queue {"task_id": "<UUID>"}
-  ↓ (API returns immediately — response does not wait for execution)
-Workers (N processes running python -m app.workers.runtime --worker-id worker-N):
-  1. Register in PostgreSQL as ACTIVE and maintain periodic heartbeats via background thread.
-  2. Consume from shared task_queue via BLPOP.
-  3. Atomic DB claim with expiring lease:
-       UPDATE tasks SET status='RUNNING', worker_id=:worker_id, lease_acquired_at=now,
-                        lease_expires_at=now + lease_duration, attempt_count=attempt_count+1
-       WHERE id=:task_id AND status='QUEUED'
-  4. While executing handler, background thread periodically renews lease.
-  5. Handler executes inside bounded thread pool with timeout enforcement (timeout_seconds).
-  6. Outcome handling:
-       - Success: RUNNING → SUCCESS (only if worker_id still matches, guarding against late completion after recovery).
-       - Retryable Error / Timeout (attempts <= max_retries): calculate exponential backoff, requeue in PostgreSQL as QUEUED, re-publish to Redis.
-       - Non-Retryable Error / Retries Exhausted: RUNNING → FAILED.
-  7. Background maintenance scanner detects stale tasks (RUNNING with expired leases) and recovers them back to QUEUED.
+  ↓
+Workers: BLPOP task_queue → atomic task claim → execute handler
+  ↓
+Worker: transition task to SUCCESS or FAILED
+  ↓
+Worker Hook (_try_advance_workflow):
+  1. Update workflow_run_nodes status (SUCCESS/FAILED)
+  2. If FAIL_FAST and failed: bulk-skip all PENDING nodes, fail run
+  3. If CONTINUE: evaluate all PENDING nodes whose dependencies are all SUCCESS
+  4. Atomically dispatch ready nodes (create Task → RPUSH task_queue)
+  5. Repeat until no state changes; mark workflow_run terminal if all nodes complete
 ```
 
 The API validates the task type, handler payload, project access, priority, timeout, scheduling, retry policy, and idempotency key. It persists the task before publishing its ID to Redis. A client receives a task ID rather than waiting for execution.
 
-### Database/Redis consistency and reconciliation (Phase 4)
+### Database/Redis consistency and reconciliation (Phase 4 & 5)
 
-The durability boundary is PostgreSQL (ADR-001, ADR-007, ADR-008, ADR-009):
+The durability boundary is PostgreSQL (ADR-001, ADR-007, ADR-008, ADR-009, ADR-010):
 
 1. Task is persisted in PostgreSQL as `QUEUED` in a committed transaction.
 2. Task ID is then published to Redis.
@@ -113,7 +129,7 @@ A recovery process identifies unhealthy workers and expired task leases from Pos
 
 ## 5. Workflow/DAG execution
 
-Workflow definitions persist nodes and directed edges. Creation validates that the graph is acyclic. At run time the workflow engine creates a `workflow_run`; a node becomes `READY` only after all required predecessors succeeded. Independent ready nodes may be submitted concurrently. Later configuration will choose fail-fast or continue behavior for dependency failure; the run and causal node results remain durable in either case.
+Workflow definitions persist nodes and directed edges. Creation validates that the graph is acyclic using Kahn's algorithm. At run time the workflow engine creates a `workflow_run` and per-run `workflow_run_nodes`; a node becomes `READY`/`RUNNING` only after all required predecessors succeeded. Independent ready nodes are submitted concurrently across available workers. Configured failure policies (`FAIL_FAST` vs. `CONTINUE`) govern behavior when a branch fails.
 
 ## 6. Observability and security boundaries
 
@@ -128,15 +144,16 @@ The browser is an untrusted client. The API authenticates users/API keys, applie
 | `users` | Users. PK `id`; `email` (unique), `password_hash`, `role`, `created_at`. Owns projects and API keys; unique email index. Passwords are hashed, never plaintext. |
 | `projects` | Authorization/ownership scope. PK `id`; FK `owner_id -> users`, `name`, `status`, `created_at`. Index `owner_id`; unique owner/name if product rules require it. |
 | `api_keys` | Machine credentials. PK `id`; FK `user_id -> users`, `key_hash`, `name`, `last_used_at`, `revoked_at`, `created_at`. Unique key-hash and `user_id` indexes. |
-| `tasks` | Authoritative task record. PK `id`; FK `project_id -> projects`; `type`, `payload_json`, `status`, `priority`, `idempotency_key`, `scheduled_at`, `timeout_seconds`, `max_retries`, `attempt_count`, `created_at`, `queued_at`, `started_at`, `finished_at`, result/error summary. Indexes: `(project_id,status)` for project views; `(status,priority,created_at)` for dispatch/queue ordering; `(scheduled_at)` for scheduler scans; unique `(project_id,idempotency_key)` when supplied. |
+| `tasks` | Authoritative task record. PK `id`; FK `project_id -> projects`, nullable FK `workflow_run_node_id -> workflow_run_nodes`; `type`, `payload_json`, `status`, `priority`, `idempotency_key`, `scheduled_at`, `timeout_seconds`, `max_retries`, `attempt_count`, `worker_id`, `lease_acquired_at`, `lease_expires_at`, `last_heartbeat_at`, `created_at`, `queued_at`, `started_at`, `finished_at`, result/error summary. Indexes: `(project_id,status)`, `(status,priority,created_at)`, `(scheduled_at)`, `(status,lease_expires_at)`, unique `(project_id,idempotency_key)`. |
 | `task_attempts` | One execution attempt. PK `id`; FKs `task_id -> tasks`, nullable `worker_id -> workers`; `attempt_no`, `status`, `started_at`, `finished_at`, `error_code`, `error_message`, result metadata, lease token. Unique `(task_id,attempt_no)` and index `(task_id)`. |
 | `task_events` | Immutable task timeline/audit. PK `id`; FK `task_id -> tasks`; `event_type`, `actor_id`/`worker_id`, `metadata_json`, `created_at`. Index `(task_id,created_at)`. |
-| `workers` | Worker registry/liveness. PK `id`; `hostname`, `version`, `status`, `capabilities_json`, `concurrency_limit`, `last_heartbeat_at`, `registered_at`. Index `(status,last_heartbeat_at)` for health scans. |
-| `task_leases` | Current per-task ownership. PK/unique `task_id`; FKs `task_id -> tasks`, `worker_id -> workers`; `attempt_id`, `lease_token`, `acquired_at`, `expires_at`. Index `(expires_at)` for recovery and `(worker_id)` for worker inspection. |
-| `workflows` | DAG definition. PK `id`; FK `project_id -> projects`; `name`, definition status, `created_at`. Index `project_id`. |
-| `workflow_nodes` | Nodes in a workflow. PK `id`; FK `workflow_id -> workflows`; `node_key`, `task_type`, `payload_json`, definition status. Unique `(workflow_id,node_key)` and PRD index `(workflow_id,status)`. |
-| `workflow_edges` | Directed dependencies. Composite PK `(workflow_id,from_node_id,to_node_id)`; FKs to workflow/nodes. Index `(workflow_id,to_node_id)` for prerequisite evaluation. |
-| `workflow_runs` | Execution instance. PK `id`; FK `workflow_id -> workflows`; `status`, `started_at`, `finished_at`, policy/result/error metadata. Index `(workflow_id,started_at)`. A later node-run mapping may associate nodes/tasks with a run without changing the durable-source principle. |
+| `workers` | Worker registry/liveness. PK `id`; `hostname`, `status`, `started_at`, `last_heartbeat_at`, `stopped_at`. Index `(status,last_heartbeat_at)` for health scans. |
+| `workflows` | Reusable DAG definition. PK `id`; FK `project_id -> projects`; `name`, `failure_policy`, `created_at`. Index `(project_id)`. |
+| `workflow_nodes` | Nodes in a workflow definition. PK `id`; FK `workflow_id -> workflows`; `node_key`, `task_type`, `payload_json`, `timeout_seconds`, `max_retries`. Unique `(workflow_id,node_key)` and index `(workflow_id)`. |
+| `workflow_edges` | Directed dependencies. PK `id`; FKs `workflow_id -> workflows`, `from_node_id -> workflow_nodes`, `to_node_id -> workflow_nodes`. Unique `(workflow_id,from_node_id,to_node_id)` and index `(workflow_id,to_node_id)`. |
+| `workflow_runs` | Execution instance of a workflow. PK `id`; FK `workflow_id -> workflows`; `status`, `failure_policy`, `started_at`, `finished_at`, `error_message`. Index `(workflow_id,started_at)`. |
+| `workflow_run_nodes` | Per-run node execution state. PK `id`; FKs `workflow_run_id -> workflow_runs`, `workflow_node_id -> workflow_nodes`, nullable FK `task_id -> tasks`; `status`, `started_at`, `finished_at`, `error_message`. Unique `(workflow_run_id,workflow_node_id)` and index `(workflow_run_id,status)`. |
+ce principle. |
 
 Indexes are initial designs; additional indexes require measured query plans (`EXPLAIN ANALYZE`).
 

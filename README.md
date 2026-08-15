@@ -1,22 +1,23 @@
 # Distributed Task Execution & Workflow Platform
 
-Phase 4 implements reliable worker/task execution: worker heartbeats, task leases,
-execution timeouts, exponential backoff retries, and concurrency-safe stale task recovery.
+Phase 5 implements Workflow Directed Acyclic Graphs (DAGs): graph cycle validation via Kahn's algorithm, dependency-aware execution, parallel branch dispatch, atomic duplicate-dispatch prevention, and customizable failure policies (`FAIL_FAST` / `CONTINUE`).
 
-## Architecture (Phase 4)
+## Architecture (Phase 5)
 
 ```
                           ┌────────────────────────────────────┐
                           │   Worker 1 (--worker-id worker-1)  │
                           │   - Heartbeats to PostgreSQL       │
                           │   - Renews active task lease       │
+                          │   - Advances workflow on complete  │
                           └──────────────┬─────────────────────┘
                                          │
 Client                                   │
   ↓                                      │
-FastAPI  ───────────────► PostgreSQL ◄───┼ (atomic claim, leases, recovery)
-  │ (persist QUEUED,      (source of     │
-  │  then publish ID)      truth)        │
+FastAPI  ───────────────► PostgreSQL ◄───┼ (atomic claim, leases, recovery, runs)
+  │ (validate DAG &       (source of     │
+  │  dispatch ready        truth)        │
+  │  tasks via Redis)                    │
   ↓                                      │
 Redis (task_queue) ──────────────────────┤
   (shared dispatch queue)                │
@@ -25,14 +26,11 @@ Redis (task_queue) ────────────────────�
                           │   Worker 2 (--worker-id worker-2)  │
                           │   - Heartbeats to PostgreSQL       │
                           │   - Recovers expired stale tasks   │
+                          │   - Executes parallel DAG branches │
                           └────────────────────────────────────┘
 ```
 
-PostgreSQL is the authoritative source of truth. Redis is the shared dispatch queue.
-Workers compete for task messages via `BLPOP` and perform an atomic claim that sets
-an expiring lease (`lease_expires_at`). The worker renews this lease while running the task.
-If a worker crashes, its lease expires; any healthy worker automatically recovers the task,
-resets it to `QUEUED`, and re-enqueues it on Redis.
+PostgreSQL is the authoritative source of truth for workflow definitions, runs, and per-run node states (`workflow_run_nodes`). Redis is the shared dispatch queue. Ready nodes are dispatched as standard task records into Redis, and independent parallel branches execute concurrently across all available workers.
 
 ## Local backend setup
 
@@ -61,7 +59,7 @@ Required environment variables:
 | `ENVIRONMENT` | `development` or `test` |
 | `REDIS_URL` | Redis connection string. Default: `redis://localhost:6379/0` |
 
-### Phase 4 Reliability Configuration (Optional Overrides)
+### Reliability Configuration (Optional Overrides)
 
 | Variable | Default | Description |
 |---|---|---|
@@ -74,85 +72,40 @@ Required environment variables:
 | `RETRY_BACKOFF_BASE_SECONDS` | `1.0` | Base delay for exponential backoff (`base * 2^(attempt-1)`) |
 | `RETRY_BACKOFF_MAX_SECONDS` | `60.0` | Maximum cap for retry backoff delay |
 
-## Redis setup (WSL2)
+## Workflow DAG API (Phase 5)
 
-Redis runs inside WSL2 Ubuntu. Start it with:
+### 1. Create a Workflow Definition (DAG)
+`POST /v1/workflows`
 
-```bash
-# In WSL2 terminal
-redis-server --daemonize yes
-redis-cli ping   # should return PONG
+```json
+{
+  "project_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "name": "Diamond Pipeline",
+  "failure_policy": "FAIL_FAST",
+  "nodes": [
+    {"node_key": "A", "task_type": "sleep", "payload": {"seconds": 1.0}},
+    {"node_key": "B", "task_type": "csv_stats", "payload": {"csv_data": "a,b\n1,2"}},
+    {"node_key": "C", "task_type": "sleep", "payload": {"seconds": 1.0}},
+    {"node_key": "D", "task_type": "http_check", "payload": {"url": "https://example.com"}}
+  ],
+  "edges": [
+    {"from": "A", "to": "B"},
+    {"from": "A", "to": "C"},
+    {"from": "B", "to": "D"},
+    {"from": "C", "to": "D"}
+  ]
+}
 ```
 
-Verify from Windows PowerShell:
+### 2. Trigger a Workflow Run
+`POST /v1/workflows/{workflow_id}/run`
 
-```powershell
-Test-NetConnection localhost -Port 6379
-# TcpTestSucceeded : True
-```
+Returns `202 Accepted` with initial run state and root nodes dispatched.
 
-## Starting the API
+### 3. Inspect Run Progress
+`GET /v1/workflows/{workflow_id}/runs/{run_id}`
 
-```powershell
-cd backend
-.\.venv\Scripts\Activate.ps1
-uvicorn app.main:app --reload
-```
-
-API is available at `http://127.0.0.1:8000`. Swagger UI at `http://127.0.0.1:8000/docs`.
-
-## Starting workers
-
-Each worker process is an independent process that registers in PostgreSQL and consumes
-from the shared `task_queue`. Give each worker a unique `--worker-id`:
-
-**Terminal 2 (Worker 1):**
-```powershell
-cd backend
-.\.venv\Scripts\Activate.ps1
-python -m app.workers.runtime --worker-id worker-1
-```
-
-**Terminal 3 (Worker 2):**
-```powershell
-cd backend
-.\.venv\Scripts\Activate.ps1
-python -m app.workers.runtime --worker-id worker-2
-```
-
-## Worker failure & recovery simulation (manual test)
-
-1. Start `worker-1` and `worker-2` in separate terminals.
-2. Submit a 15-second sleep task (`POST /v1/tasks` with `{"type": "sleep", "payload": {"seconds": 15}}`).
-3. Note in the terminal that `worker-1` claims the task and starts heartbeating.
-4. Kill `worker-1` (press Ctrl+C or terminate terminal).
-5. Watch `worker-2` logs: as soon as `worker-1`'s lease expires, `worker-2`'s background recovery scanner detects the stale task, resets it to `QUEUED`, re-enqueues it to Redis, claims it, and executes it to `SUCCESS`.
-6. Query PostgreSQL to inspect task attempts and state:
-
-```sql
-SELECT id,
-       type,
-       status,
-       worker_id,
-       attempt_count,
-       started_at,
-       finished_at,
-       result_summary
-FROM tasks
-ORDER BY created_at DESC;
-```
-
-## Checking worker health
-
-Inspect registered workers and heartbeats via API:
-- `GET /v1/workers` (requires Authorization bearer token)
-
-Or query PostgreSQL directly:
-```sql
-SELECT id, hostname, status, started_at, last_heartbeat_at, stopped_at
-FROM workers
-ORDER BY started_at DESC;
-```
+Returns real-time execution status of all nodes in the workflow run (`PENDING`, `RUNNING`, `SUCCESS`, `FAILED`, `SKIPPED`).
 
 ## Running tests
 
@@ -166,7 +119,20 @@ cd backend
 .\.venv\Scripts\pytest.exe -v
 ```
 
+### Run Phase 5 tests only:
+```powershell
+cd backend
+.\.venv\Scripts\pytest.exe -v app/tests/test_phase5_dag_validation.py app/tests/test_phase5_workflow_api.py app/tests/test_phase5_workflow_execution.py app/tests/test_phase5_failure_policy.py app/tests/test_phase5_concurrency.py
+```
+
+## Running the Workflow DAG Benchmark
+
+Measures sequential vs parallel branch speedup with real multi-worker processes:
+
+```powershell
+python benchmarks/workflow_dag_benchmark.py
+```
+
 ---
 
-Workflows (DAGs), the React dashboard, Prometheus/Grafana metrics, OpenTelemetry tracing,
-Docker Compose packaging, and cloud deployment remain planned future phases.
+The React dashboard, Prometheus/Grafana metrics, OpenTelemetry tracing, Docker Compose packaging, and cloud deployment remain planned future phases.

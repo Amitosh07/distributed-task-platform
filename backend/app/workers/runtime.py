@@ -370,6 +370,21 @@ def _load_task_metadata(task_id: UUID) -> tuple[str, dict, int] | None:
         return task.type, dict(task.payload), task.timeout_seconds
 
 
+def _try_advance_workflow(task_id: UUID) -> None:
+    """If task belongs to a workflow run node, advance the workflow engine state."""
+    try:
+        with SessionLocal() as db:
+            task = db.get(Task, task_id)
+            if task is None or task.workflow_run_node_id is None:
+                return
+            if task.status not in (TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.DEAD_LETTER, TaskStatus.TIMED_OUT):
+                return
+            from app.services.workflow_engine import advance_workflow_after_task
+            advance_workflow_after_task(db, task.workflow_run_node_id, task.status)
+    except Exception:
+        logger.exception("worker_id=%s task_id=%s event=workflow_advance_error", _worker_id, task_id)
+
+
 def _process_task(worker_id: str, task_id: UUID) -> None:
     """Claim, execute with timeout, and persist results or handle retries."""
     global _current_task_id
@@ -417,6 +432,7 @@ def _process_task(worker_id: str, task_id: UUID) -> None:
     finally:
         with _current_task_lock:
             _current_task_id = None
+        _try_advance_workflow(task_id)
 
 
 # ---------------------------------------------------------------------------

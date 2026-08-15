@@ -76,4 +76,43 @@ A heartbeat alone only says a worker was recently reachable; it does not prove t
        D
 ```
 
-`A` must succeed before `B` and `C` are `READY`; `B` and `C` may run concurrently; `D` is `READY` only after both succeed. Workflow creation validates a directed acyclic graph and rejects cycles. The workflow engine persists run/node progress and evaluates dependencies from durable state. A later policy will choose fail-fast or continue behavior after a node failure; neither policy permits dependent work to run without its declared requirements being satisfied.
+### Workflow Run Lifecycle (Phase 5)
+
+```text
+PENDING -> RUNNING -> SUCCESS
+                \---> FAILED
+```
+
+### Workflow Run Node Lifecycle (Phase 5)
+
+```text
+PENDING -> RUNNING -> SUCCESS
+    |        \------> FAILED
+    \---------------> SKIPPED (dependency failed/skipped or fail-fast)
+```
+
+| State | Description |
+|---|---|
+| `PENDING` | Node is waiting for one or more predecessor dependencies to reach final `SUCCESS`. |
+| `RUNNING` | All dependencies reached `SUCCESS`; atomic dispatch succeeded; underlying `Task` is queued/executing. |
+| `SUCCESS` | Underlying `Task` completed with `TaskStatus.SUCCESS`. Prerequisite unlocked for downstream nodes. |
+| `FAILED` | Underlying `Task` reached terminal failure (`FAILED`, `DEAD_LETTER`, `TIMED_OUT`). |
+| `SKIPPED` | Node was bypassed because an upstream dependency failed/was skipped, or because `FAIL_FAST` triggered. |
+
+### Failure Policy Rules
+
+1. **`FAIL_FAST`**: When any node in the run enters `FAILED`:
+   - All remaining `PENDING` nodes are immediately marked `SKIPPED`.
+   - The workflow run is immediately marked `FAILED`.
+   - Any currently `RUNNING` nodes complete their existing attempts, but no new work is dispatched.
+
+2. **`CONTINUE`**: When a node enters `FAILED`:
+   - Direct and indirect downstream dependent nodes are marked `SKIPPED` via cascading skip evaluation.
+   - Independent parallel branches continue executing normally to completion.
+   - The workflow run transitions to `FAILED` once all active branches finish.
+
+3. **Intermediate Retries**:
+   - If a task experiences a retryable error or timeout, the task re-enters `QUEUED` with exponential backoff.
+   - The workflow node remains `RUNNING`.
+   - Downstream dependent nodes remain `PENDING` and are **never** unlocked during retry attempts.
+   - Only final `SUCCESS` unlocks downstream dependencies.

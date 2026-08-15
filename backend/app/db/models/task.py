@@ -74,6 +74,9 @@ class Task(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     result_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    workflow_run_node_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("workflow_run_nodes.id", ondelete="SET NULL"), nullable=True,
+    )
 
     project: Mapped["Project"] = relationship(back_populates="tasks")
 
