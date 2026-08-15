@@ -4,30 +4,38 @@
 
 ```text
 CREATED -> QUEUED -> RUNNING -> SUCCESS
-    |          |        |  \-> RETRY_WAIT -> QUEUED
+    |          |        |  \-> RETRY_WAIT -> QUEUED   [Phase 4]
     |          |        |  \-> FAILED
-    |          |        |  \-> DEAD_LETTER
-    |          |        |  \-> TIMED_OUT
-    |          \------> CANCELLED
-    \-----------------> CANCELLED
+    |          |        |  \-> DEAD_LETTER             [Phase 4]
+    |          |        |  \-> TIMED_OUT               [Phase 4]
+    |          \------> CANCELLED                      [Phase 3+]
+    \-----------------> CANCELLED                      [Phase 3+]
 ```
 
-Only the transitions below are valid; conditional database updates reject every other transition. Every transition writes a timestamped `task_event`; changes to the task state and event are persisted transactionally. The task tracks attempt count, worker ID through attempts/events, start/end timestamps, and structured error information. The API/dashboard will eventually expose the resulting event timeline.
+## Phase 2 active transitions
 
-| Transition | Cause/actor | Persisted change | Retry/event |
-|---|---|---|---|
-| `CREATED -> QUEUED` | API after validation/persistence, scheduler when `scheduled_at` becomes due, or recovery reconciler | `queued_at`, status, queue eligibility | Publish to Redis may retry; record `queued`. |
-| `QUEUED -> RUNNING` | Worker that atomically claims eligible task and lease | worker/attempt, lease token/expiry, `attempt_count`, `started_at` when first run | Claim conflict is retryable by another worker; record `started`. |
-| `RUNNING -> SUCCESS` | Current lease holder reports valid successful handler outcome | result metadata, attempt end, `finished_at`, lease release | Not retried automatically; record `succeeded`. |
-| `RUNNING -> RETRY_WAIT` | Current worker reports retryable failure, or recovery determines retryable interrupted attempt | error, attempt end, calculated next eligible time, lease release | Yes, after backoff/jitter; record `retry_scheduled`. |
-| `RETRY_WAIT -> QUEUED` | Scheduler/reconciler after retry time | status and `queued_at`/dispatch eligibility | Enqueue may retry; record `requeued`. |
-| `RUNNING -> FAILED` | Non-retryable handler failure, or retry policy ends without dead-letter policy | error, attempt end, `finished_at`, release lease | No automatic retry; record `failed`. |
-| `RUNNING -> DEAD_LETTER` | Retryable failure or recovery after attempts are exhausted | final error, attempt end, `finished_at`, release lease | Manual/operator retry is a separate future action; record `dead_lettered`. |
-| `RUNNING -> TIMED_OUT` | Timeout monitor/current worker detects timeout and safely terminates or marks work expired | timeout error, attempt end, `finished_at`, release/expire lease | Future policy may retry if safe and attempts remain; record `timed_out`. |
-| `CREATED -> CANCELLED` | Authorized client cancels before queue eligibility | `finished_at`, cancellation metadata | No automatic retry; record `cancelled`. |
-| `QUEUED -> CANCELLED` | Authorized client cancels before successful claim | `finished_at`, cancellation metadata; stale queue references become no-ops | No automatic retry; record `cancelled`. |
+Phase 2 implements and tests the following transitions. All others are defined
+in the state machine but not yet triggered by application code.
 
-Manual retry is not a bypass of the model: it validates an eligible terminal state, creates an auditable retry request, and returns the task to queue eligibility under a defined policy. Late worker completions are rejected if their lease/attempt token is no longer current.
+| Transition | Actor | Persisted change |
+|---|---|---|
+| `CREATED → QUEUED` | API (`create_task`) during task submission | `queued_at`, `status = QUEUED` committed before Redis publish |
+| `QUEUED → RUNNING` | Worker (`_process_task`) on message receipt | `started_at`, `attempt_count += 1`, `status = RUNNING`, committed |
+| `RUNNING → SUCCESS` | Worker after handler returns successfully | `result_summary`, `finished_at`, `status = SUCCESS`, committed |
+| `RUNNING → FAILED` | Worker after handler raises any exception | `error_message`, `finished_at`, `status = FAILED`, committed |
+
+### Phase 2 notes
+
+- **CREATED is transient in Phase 2**: tasks move directly from `CREATED` to
+  `QUEUED` in a single DB commit during `create_task()`. A client never observes
+  a task in `CREATED` status from the API.
+- **No retries**: failed tasks stay `FAILED`. `RETRY_WAIT` and `DEAD_LETTER`
+  are Phase 4 features.
+- **No cancellation**: `CANCELLED` is Phase 3+.
+- **No timeouts**: `TIMED_OUT` is Phase 4.
+- **No leases or heartbeats**: Phase 3.
+- **Worker resilience**: the worker loop catches all handler exceptions and
+  continues processing the next task after a `FAILED` transition.
 
 ## Queue wait versus execution time
 

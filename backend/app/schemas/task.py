@@ -39,8 +39,11 @@ class TaskResponse(BaseModel):
     max_retries: int
     attempt_count: int
     created_at: datetime
+    queued_at: datetime | None
     started_at: datetime | None
     finished_at: datetime | None
+    result_summary: dict[str, Any] | None
+    error_message: str | None
 
 
 class TaskListResponse(BaseModel):

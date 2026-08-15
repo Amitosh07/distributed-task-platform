@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = Field(default=30, ge=1, le=1440)
     environment: str = "development"
+    redis_url: str = Field(default="redis://localhost:6379/0")
 
 
 @lru_cache

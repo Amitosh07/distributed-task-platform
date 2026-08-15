@@ -4,6 +4,8 @@
 
 The platform is initially a modular monolith: one FastAPI application owns the HTTP/API and domain rules, with separately running worker processes for asynchronous execution. PostgreSQL is the authoritative durable source of truth; Redis is the fast queue and coordination layer. A React dashboard calls the API and never coordinates workers directly.
 
+**Phase 2 (current):** One worker process; Redis dispatch queue; four safe handlers; no heartbeats, leases, or retries yet.
+
 ```text
 Browser
   |
@@ -52,22 +54,47 @@ Grafana visualizes those metrics. OpenTelemetry correlates requests and work.
 
 ## 3. Data flow and task submission
 
+### Phase 2 pipeline
+
 ```text
-Client -> POST /v1/tasks -> FastAPI validation/authorization
-       -> PostgreSQL transaction: task + CREATED event
-       -> PostgreSQL: QUEUED state/event when eligible
-       -> Redis: dispatch reference (task ID, not authoritative state)
-       -> Worker -> PostgreSQL claim/lease + RUNNING attempt/event
-       -> handler -> PostgreSQL result, attempt, event, terminal/retry state
+Client → POST /v1/tasks
+  ↓
+FastAPI: validate request, authenticate, check project access
+  ↓
+PostgreSQL: persist task (status = QUEUED, queued_at = now)
+  ↓
+Redis: RPUSH task_queue {"task_id": "<UUID>"}
+  ↓ (API returns immediately — response does not wait for execution)
+Worker (python -m app.workers.runtime):
+  BLPOP task_queue
+  ↓
+  Load Task from PostgreSQL
+  ↓
+  Validate status == QUEUED (defensive check)
+  ↓
+  Transition QUEUED → RUNNING (set started_at, attempt_count += 1, commit)
+  ↓
+  Dispatch to registered handler (HANDLERS registry)
+  ↓
+  On success: result_summary, RUNNING → SUCCESS, finished_at, commit
+  On failure: error_message, RUNNING → FAILED, finished_at, commit
+  ↓
+  Loop — worker never exits on task failure
 ```
 
 The API validates the task type, handler payload, project access, priority, timeout, scheduling, retry policy, and idempotency key. It persists the task before publishing its ID to Redis. A client receives a task ID rather than waiting for execution.
 
-### Database/Redis consistency and reconciliation
+### Database/Redis consistency and reconciliation (Phase 2)
 
-The durability boundary is PostgreSQL. If the database write succeeds but Redis enqueue fails, the task remains durably `QUEUED` (or marked pending dispatch) and a future reconciler/scheduler scans due, unleased queued tasks and republishes their IDs. Publishing should be retried with bounded backoff and emit an event/metric.
+The durability boundary is PostgreSQL. Phase 2 uses a simple "PostgreSQL first" strategy (see ADR-007):
 
-If Redis enqueue succeeds but a worker cannot read or update durable state, the worker must not execute based only on the queue message. It verifies eligibility and atomically claims the durable task/lease first; otherwise it abandons/acknowledges the stale queue reference. Duplicate Redis messages are safe because the durable claim and idempotency rules decide execution. Redis outages preserve database state; recovery re-enqueues eligible tasks from PostgreSQL.
+1. Task is persisted in PostgreSQL as `QUEUED` in a committed transaction.
+2. Task ID is then published to Redis.
+3. If Redis publish fails after the DB commit, the task remains durably `QUEUED` in PostgreSQL. A warning is logged. The task is recoverable; a future reconciler (Phase 4) will re-enqueue stranded `QUEUED` tasks.
+4. The worker always loads the authoritative task state from PostgreSQL before executing — it never executes based solely on the Redis message.
+5. If a task is already in a terminal state when the worker processes its queue message, the worker skips it (defensive duplicate check).
+
+The full transactional outbox pattern is deferred to Phase 4. At-least-once delivery plus idempotency is the declared architecture (ADR-003).
 
 ## 4. Execution, registration, heartbeat, and recovery flows
 
