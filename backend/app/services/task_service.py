@@ -12,6 +12,9 @@ from app.queue.publisher import publish_task
 from app.schemas.task import TaskCreate
 from app.services.errors import APIError
 from app.services.project_service import get_owned_project
+from app.observability.metrics import TASK_SUBMISSIONS
+from app.observability.tracing import tracer
+from app.observability.logging import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +38,8 @@ def create_task(db: Session, owner: User, request: TaskCreate) -> tuple[Task, bo
            A future reconciler (Phase 4) will re-enqueue stranded QUEUED tasks.
            The API still returns the task; the caller can poll for execution.
     """
-    get_owned_project(db, owner, request.project_id)
+    with tracer("tasks").start_as_current_span("task.submit"):
+        get_owned_project(db, owner, request.project_id)
     if request.type not in SUPPORTED_TASK_TYPES:
         raise APIError(status_code=422, code="unsupported_task_type", message="Task type is not supported")
     if request.idempotency_key:
@@ -63,7 +67,8 @@ def create_task(db: Session, owner: User, request: TaskCreate) -> tuple[Task, bo
                 return existing, False
         raise APIError(status_code=409, code="duplicate_task", message="Task conflicts with an existing resource") from None
     db.refresh(task)
-    logger.info("Task %s [%s] created and persisted as QUEUED", task.id, task.type)
+    log_event(logger, logging.INFO, "task_submitted", "Task persisted as queued", service="api", task_id=task.id, task_type=task.type, status="QUEUED")
+    TASK_SUBMISSIONS.labels(task.type).inc()
 
     # Publish to Redis — non-blocking best-effort after the durable commit.
     published = publish_task(task.id)

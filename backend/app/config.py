@@ -29,8 +29,12 @@ class Settings(BaseSettings):
     retry_backoff_base_seconds: float = Field(default=1.0, ge=0)
     retry_backoff_max_seconds: float = Field(default=60.0, ge=0)
 
+    # Phase 7 — observability remains optional/non-critical.
+    otel_enabled: bool = True
+    otel_exporter_otlp_endpoint: str | None = None
+    log_level: str = "INFO"
+
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

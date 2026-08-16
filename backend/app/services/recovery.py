@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from app.db.models.task import Task, TaskStatus
 from app.db.models.worker import Worker, WorkerStatus
 from app.queue.publisher import publish_task
+from app.observability.metrics import STALE_WORKERS, WORKER_RECOVERIES
 
 logger = logging.getLogger("recovery.service")
 
@@ -92,6 +93,7 @@ def recover_stale_tasks(db: Session, now: datetime | None = None) -> list[UUID]:
                 if not published:
                     logger.error("Failed to re-enqueue recovered task %s to Redis", task_id)
                 recovered_queued_ids.append(task_id)
+                WORKER_RECOVERIES.inc()
             else:
                 logger.warning("Stale task %s exceeded max_retries -> marked FAILED", task_id)
 
@@ -127,6 +129,6 @@ def detect_stale_workers(
     db.commit()
     stale_ids = [row[0] for row in result.fetchall()]
     if stale_ids:
+        STALE_WORKERS.inc(len(stale_ids))
         logger.info("Marked %d workers as STALE: %s", len(stale_ids), stale_ids)
     return stale_ids
-

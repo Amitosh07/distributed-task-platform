@@ -4,7 +4,7 @@
 
 The platform is initially a modular monolith: one FastAPI application owns the HTTP/API and domain rules, with separately running worker processes for asynchronous execution. PostgreSQL is the authoritative durable source of truth; Redis is the fast queue and coordination layer. A React dashboard calls the API and never coordinates workers directly.
 
-**Phase 5 (current):** Directed Acyclic Graph (DAG) workflow engine; reusable workflow definitions with Kahn's algorithm cycle detection; parallel branch execution across multiple workers; atomic duplicate-dispatch prevention; fail-fast and continue failure policies; run node state isolation via `workflow_run_nodes`.
+**Phase 7 (current):** Phase 5 DAG execution plus Phase 6 dashboard and Phase 7 Prometheus metrics, JSON logs, correlation IDs, and optional OpenTelemetry traces.
 
 ```text
 Browser
@@ -38,6 +38,9 @@ PostgreSQL <--------------------> Redis                     |
                                       |
                                       v
                          Dependency evaluation loop
+
+FastAPI / Workers -> Prometheus metrics -> Prometheus -> Grafana
+FastAPI -> queue trace context -> Workers -> OpenTelemetry collector
 ```
 
 Prometheus collects metrics from the API, Redis integration, and workers.

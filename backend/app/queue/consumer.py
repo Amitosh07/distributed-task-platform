@@ -14,11 +14,12 @@ from uuid import UUID
 
 from app.queue.redis_client import get_redis_client
 from app.queue.publisher import QUEUE_NAME
+from app.observability.metrics import QUEUE_CONSUMED, QUEUE_CONSUME_FAILURES
 
 logger = logging.getLogger(__name__)
 
 
-def consume_task(timeout_seconds: int = 5) -> UUID | None:
+def consume_task_message(timeout_seconds: int = 5) -> tuple[UUID, dict[str, str]] | None:
     """Block until a task ID is available on the queue, then return it.
 
     Returns the parsed task UUID, or None if the timeout elapsed with no
@@ -39,8 +40,16 @@ def consume_task(timeout_seconds: int = 5) -> UUID | None:
     try:
         data = json.loads(raw_message)
         task_id = UUID(data["task_id"])
+        QUEUE_CONSUMED.inc()
         logger.debug("Consumed task ID %s from %s", task_id, QUEUE_NAME)
-        return task_id
+        return task_id, data.get("trace_context", {})
     except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        QUEUE_CONSUME_FAILURES.inc()
         logger.error("Malformed queue message discarded: %r — %s", raw_message, exc)
         raise
+
+
+def consume_task(timeout_seconds: int = 5) -> UUID | None:
+    """Backward-compatible task-only consumer used by older callers."""
+    message = consume_task_message(timeout_seconds)
+    return message[0] if message else None

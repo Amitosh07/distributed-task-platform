@@ -34,23 +34,24 @@ from app.config import get_settings
 from app.db.database import SessionLocal
 from app.db.models.task import Task, TaskStatus
 from app.db.models.worker import Worker, WorkerStatus
-from app.queue.consumer import consume_task
+from app.queue.consumer import consume_task_message
 from app.queue.publisher import publish_task
 from app.queue.redis_client import check_redis_health
 from app.services.recovery import detect_stale_workers, recover_stale_tasks
 from app.services.retry_policy import calculate_backoff_delay, is_retryable_error
 from app.workers.exceptions import NonRetryableError, TaskTimeoutError
 from app.workers.handlers import HANDLERS
+from app.observability.logging import configure_logging, log_event
+from app.observability.metrics import (TASK_COMPLETIONS, TASK_EXECUTION, TASK_FAILURES, TASK_QUEUE_WAIT, TASK_RETRIES, TASK_RUNNING, TASK_TIMEOUTS, WORKER_CLAIMS, WORKER_COMPLETIONS, WORKER_FAILURES, WORKER_HEARTBEATS, WORKERS_STARTED)
+from app.observability.tracing import configure_tracing, tracer
+from opentelemetry.propagate import extract
 
 # ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
-)
+configure_logging(get_settings().log_level)
+configure_tracing()
 logger = logging.getLogger("worker.runtime")
 
 _running = True
@@ -70,14 +71,7 @@ signal.signal(signal.SIGINT, _handle_sigterm)
 
 
 def _log(worker_id: str | None, task_id, event: str, detail: str = "") -> None:
-    wid = worker_id or _worker_id
-    parts = [f"worker_id={wid}"]
-    if task_id is not None:
-        parts.append(f"task_id={task_id}")
-    parts.append(f"event={event}")
-    if detail:
-        parts.append(detail)
-    logger.info(" ".join(parts))
+    log_event(logger, logging.INFO, event, detail or event.replace("_", " "), service="worker", worker_id=worker_id or _worker_id, task_id=task_id)
 
 
 def _now_utc() -> datetime:
@@ -132,6 +126,7 @@ def _send_heartbeat(worker_id: str) -> None:
         )
         db.commit()
     _log(worker_id, None, "worker_heartbeat")
+    WORKER_HEARTBEATS.inc()
 
 
 def _unregister_worker(worker_id: str) -> None:
@@ -291,12 +286,17 @@ def _transition_to_success(worker_id: str, task_id: UUID, result: dict) -> bool:
         if task is None or task.status != TaskStatus.RUNNING or task.worker_id != worker_id:
             _log(worker_id, task_id, "task_completion_stale", "task was recovered or expired before completion")
             return False
+        task_type = task.type
+        started_at = task.started_at
         task.status = TaskStatus.SUCCESS
         task.finished_at = now
         task.result_summary = result
         db.commit()
 
     _log(worker_id, task_id, "task_succeeded")
+    TASK_COMPLETIONS.labels(task_type, "SUCCESS").inc(); WORKER_COMPLETIONS.labels(task_type).inc()
+    if started_at: TASK_EXECUTION.labels(task_type).observe((now - started_at).total_seconds())
+    TASK_RUNNING.labels(task_type).dec()
     return True
 
 
@@ -338,6 +338,8 @@ def _handle_task_failure(worker_id: str, task_id: UUID, exc: Exception) -> None:
             task.last_heartbeat_at = None
             task.error_message = f"Attempt {attempt_count} failed ({error_msg}) — scheduled retry"
             db.commit()
+            TASK_RETRIES.labels(task.type).inc()
+            TASK_RUNNING.labels(task.type).dec()
             _log(
                 worker_id, task_id, "task_retry_scheduled",
                 f"attempt={attempt_count}/{max_retries} backoff={backoff_delay:.1f}s error={error_msg[:80]!r}"
@@ -352,6 +354,8 @@ def _handle_task_failure(worker_id: str, task_id: UUID, exc: Exception) -> None:
             task.finished_at = now
             task.error_message = f"Execution failed: {error_msg}"
             db.commit()
+            TASK_FAILURES.labels(task.type, "FAILED").inc(); WORKER_FAILURES.labels(task.type).inc(); TASK_RUNNING.labels(task.type).dec()
+            if isinstance(exc, TaskTimeoutError): TASK_TIMEOUTS.labels(task.type).inc()
             _log(
                 worker_id, task_id, "task_failed",
                 f"attempt={attempt_count}/{max_retries} retryable={retryable} error={error_msg[:100]!r}"
@@ -385,14 +389,15 @@ def _try_advance_workflow(task_id: UUID) -> None:
         logger.exception("worker_id=%s task_id=%s event=workflow_advance_error", _worker_id, task_id)
 
 
-def _process_task(worker_id: str, task_id: UUID) -> None:
+def _process_task(worker_id: str, task_id: UUID, trace_context: dict[str, str] | None = None) -> None:
     """Claim, execute with timeout, and persist results or handle retries."""
     global _current_task_id
     _log(worker_id, task_id, "task_received")
 
-    # 1. Atomic claim with lease
-    if not _atomic_claim(worker_id, task_id):
-        return
+    # 1. Atomic claim with lease; queue trace context becomes this worker span's parent.
+    with tracer("worker").start_as_current_span("worker.task", context=extract(trace_context or {})):
+        if not _atomic_claim(worker_id, task_id):
+            return
 
     with _current_task_lock:
         _current_task_id = task_id
@@ -404,6 +409,11 @@ def _process_task(worker_id: str, task_id: UUID) -> None:
             _log(worker_id, task_id, "task_load_failed", "task missing after claim")
             return
         task_type, payload, timeout_seconds = meta
+        WORKER_CLAIMS.labels(task_type).inc(); TASK_RUNNING.labels(task_type).inc()
+        with SessionLocal() as db:
+            queued_task = db.get(Task, task_id)
+            if queued_task and queued_task.queued_at:
+                TASK_QUEUE_WAIT.labels(task_type).observe((_now_utc() - queued_task.queued_at).total_seconds())
 
         _log(worker_id, task_id, "task_started", f"type={task_type} timeout={timeout_seconds}s")
 
@@ -443,6 +453,7 @@ def run(worker_id: str) -> None:
     """Start the Phase 4 worker process."""
     global _worker_id
     _worker_id = worker_id
+    WORKERS_STARTED.inc()
 
     _log(worker_id, None, "worker_starting", "=" * 50)
     _log(worker_id, None, "worker_starting", f"Phase 4 reliable worker — id={worker_id}")
@@ -473,16 +484,17 @@ def run(worker_id: str) -> None:
     try:
         while _running:
             try:
-                task_id = consume_task(timeout_seconds=3)
+                message = consume_task_message(timeout_seconds=3)
             except Exception as exc:  # noqa: BLE001
                 logger.error("worker_id=%s event=consume_error error=%r", worker_id, str(exc))
                 continue
 
-            if task_id is None:
+            if message is None:
                 continue
+            task_id, trace_context = message
 
             try:
-                _process_task(worker_id, task_id)
+                _process_task(worker_id, task_id, trace_context)
             except Exception as exc:  # noqa: BLE001
                 logger.error(
                     "worker_id=%s task_id=%s event=unexpected_error error=%r",

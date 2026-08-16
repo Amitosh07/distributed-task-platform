@@ -37,6 +37,8 @@ from app.queue.publisher import publish_task
 from app.services.errors import APIError
 from app.services.project_service import get_owned_project
 from app.services.task_service import SUPPORTED_TASK_TYPES
+from app.observability.metrics import WORKFLOW_COMPLETED, WORKFLOW_DURATION, WORKFLOW_NODES, WORKFLOW_STARTED
+from app.observability.tracing import tracer
 
 logger = logging.getLogger("workflow.engine")
 
@@ -293,6 +295,7 @@ def _dispatch_node(db: Session, run_node: WorkflowRunNode, workflow: Workflow) -
     db.commit()
 
     publish_task(task.id)
+    WORKFLOW_NODES.labels(workflow_node.task_type, "DISPATCHED").inc()
     logger.info(
         "node_dispatched run_node_id=%s node_key=%s task_id=%s task_type=%s",
         run_node.id, workflow_node.node_key, task.id, workflow_node.task_type,
@@ -320,6 +323,7 @@ def start_workflow_run(db: Session, owner: User, workflow_id: UUID) -> WorkflowR
         started_at=now,
     )
     db.add(run)
+    WORKFLOW_STARTED.labels(workflow.failure_policy).inc()
     db.flush()
 
     run_nodes_map: dict[UUID, WorkflowRunNode] = {}
@@ -445,13 +449,19 @@ def _check_workflow_completion(db: Session, run: WorkflowRun) -> None:
         if any(n.status == WorkflowRunNodeStatus.FAILED for n in nodes):
             run.status = WorkflowRunStatus.FAILED
             logger.info("workflow_run_failed run_id=%s", run.id)
+            WORKFLOW_COMPLETED.labels("FAILED", run.failure_policy).inc()
         elif all(n.status == WorkflowRunNodeStatus.SUCCESS for n in nodes):
             run.status = WorkflowRunStatus.SUCCESS
             logger.info("workflow_run_completed run_id=%s", run.id)
+            WORKFLOW_COMPLETED.labels("SUCCESS", run.failure_policy).inc()
         else:
             # Contains skipped nodes without direct failure (or partial branch completion)
             run.status = WorkflowRunStatus.FAILED
             logger.info("workflow_run_failed_with_skipped run_id=%s", run.id)
+            WORKFLOW_COMPLETED.labels("FAILED", run.failure_policy).inc()
+
+        if run.started_at:
+            WORKFLOW_DURATION.labels(run.failure_policy).observe((now - run.started_at).total_seconds())
 
         db.commit()
 
@@ -475,11 +485,13 @@ def advance_workflow_after_task(db: Session, run_node_id: UUID, task_status: Tas
         run_node.status = WorkflowRunNodeStatus.SUCCESS
         run_node.finished_at = now
         logger.info("node_completed run_node_id=%s run_id=%s", run_node.id, run.id)
+        WORKFLOW_NODES.labels(run_node.workflow_node.task_type, "SUCCESS").inc()
     elif task_status in (TaskStatus.FAILED, TaskStatus.DEAD_LETTER, TaskStatus.TIMED_OUT):
         run_node.status = WorkflowRunNodeStatus.FAILED
         run_node.finished_at = now
         run_node.error_message = f"Task execution {task_status.value.lower()}"
         logger.warning("node_failed run_node_id=%s run_id=%s status=%s", run_node.id, run.id, task_status.value)
+        WORKFLOW_NODES.labels(run_node.workflow_node.task_type, "FAILED").inc()
 
     db.commit()
 
@@ -501,6 +513,7 @@ def advance_workflow_after_task(db: Session, run_node_id: UUID, task_status: Tas
         run.finished_at = now
         run.error_message = "Workflow failed: fail-fast policy triggered by node failure"
         db.commit()
+        WORKFLOW_COMPLETED.labels("FAILED", run.failure_policy).inc()
         logger.info("workflow_run_fail_fast run_id=%s", run.id)
         return
 

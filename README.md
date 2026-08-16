@@ -40,6 +40,22 @@ Open the URL printed by Vite (normally `http://localhost:5173`). Set `VITE_API_B
 
 The dashboard includes a project selector, task filters and server-side pagination, task detail/state data, worker heartbeat ages, workflow definitions, and read-only workflow run DAG status. Pages poll while open (workers every 5 seconds; overview/tasks every 8 seconds; task and workflow-run detail every 2.5 seconds).
 
+## Observability (Phase 7)
+
+FastAPI exposes Prometheus metrics at `http://localhost:8000/metrics`. API logs and worker logs are JSON, and every HTTP response returns `X-Request-ID` (preserving a caller-provided value). IDs are used in logs/traces only—not Prometheus labels—so metric cardinality stays bounded.
+
+Start the local observability services after the API is running:
+
+```powershell
+docker compose up -d prometheus grafana otel-collector
+```
+
+- Prometheus: `http://localhost:9090` (target: `host.docker.internal:8000/metrics`)
+- Grafana: `http://localhost:3000` (`admin` / `admin`, change this outside local development)
+- OTLP gRPC receiver: `localhost:4317`; set `OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317` in `backend/.env` to export traces to the local collector.
+
+Prometheus/Grafana/OTLP are intentionally non-critical: if they are stopped, persistence, queueing, and workers continue. See [ADR-011](docs/adr/ADR-011-phase7-observability.md) for the metric-cardinality policy and architecture decision.
+
 ## Architecture (Phase 5)
 
 ```
