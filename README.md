@@ -1,6 +1,55 @@
 # Distributed Task Execution & Workflow Platform
 
-A production-quality distributed task execution and workflow orchestration platform built with **FastAPI**, **PostgreSQL**, **Redis**, and **React**. Phases 1–8 complete.
+A production-quality distributed task execution and workflow orchestration platform built with **FastAPI**, **PostgreSQL**, **Redis**, and **React**. Phases 1–9 complete.
+
+---
+
+## Phase 9 — Docker Compose & Containerized Deployment
+
+Phase 9 provides single-command containerized orchestration for the complete 8-service platform (PostgreSQL, Redis, FastAPI API, Worker, React Frontend, Prometheus, Grafana, OpenTelemetry Collector).
+
+### 1-Command Startup
+
+```powershell
+# Build and start the entire stack (with 3 worker replicas) in the background
+docker compose up --build -d --scale worker=3
+
+# Apply initial database migrations
+docker compose exec api alembic upgrade head
+```
+
+### Access Platform Services
+
+| Service | URL / Port | Credentials / Notes |
+|---|---|---|
+| **Operations Dashboard (React)** | [http://localhost:5173](http://localhost:5173) | Browser UI for tasks, workers, workflows |
+| **FastAPI REST API** | [http://localhost:8000](http://localhost:8000) | Root API endpoint |
+| **Interactive API Docs (Swagger)** | [http://localhost:8000/docs](http://localhost:8000/docs) | OpenAPI interactive explorer |
+| **Grafana Dashboard** | [http://localhost:3000](http://localhost:3000) | `admin` / `admin` (16 metrics panels) |
+| **Prometheus Server** | [http://localhost:9090](http://localhost:9090) | Native metrics scraper & explorer |
+| **OpenTelemetry Collector** | `localhost:4317` (gRPC), `4318` (HTTP) | Distributed trace collector |
+| **PostgreSQL Database** | `localhost:5432` | `postgres` / `postgres` (`workflow_platform`) |
+| **Redis Cache & Queue** | `localhost:6379` | DB 0 for tasks |
+
+### Common Docker Compose Commands
+
+```powershell
+# View running services and health status
+docker compose ps
+
+# Stream logs from API or workers
+docker compose logs -f api
+docker compose logs -f worker
+
+# Scale worker processes up or down dynamically
+docker compose up -d --scale worker=5
+
+# Stop the stack (PostgreSQL and Redis data is PRESERVED in named volumes)
+docker compose down
+
+# Stop the stack and DESTROY persistent database volumes (Clean reset)
+docker compose down -v
+```
 
 ---
 

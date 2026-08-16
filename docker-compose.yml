@@ -1,23 +1,173 @@
 services:
+  # ---------------------------------------------------------------------------
+  # Core Infrastructure
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: dtp-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-workflow_platform}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - dtp_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-workflow_platform}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    container_name: dtp-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - dtp_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  # ---------------------------------------------------------------------------
+  # Application Services
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: dtp-api
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-workflow_platform}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-development-secret-key-that-is-at-least-32-characters-long}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - dtp_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.workers.runtime"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-workflow_platform}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-development-secret-key-that-is-at-least-32-characters-long}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      TASK_LEASE_SECONDS: ${TASK_LEASE_SECONDS:-10.0}
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-2.0}
+      RECOVERY_INTERVAL_SECONDS: ${RECOVERY_INTERVAL_SECONDS:-5.0}
+      WORKER_STALE_THRESHOLD_SECONDS: ${WORKER_STALE_THRESHOLD_SECONDS:-10.0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - dtp_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    container_name: dtp-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - dtp_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Observability Stack
+  # ---------------------------------------------------------------------------
   prometheus:
     image: prom/prometheus:v2.54.1
-    ports: ["9090:9090"]
+    container_name: dtp-prometheus
+    ports:
+      - "9090:9090"
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      - api
+    networks:
+      - dtp_network
+
   grafana:
     image: grafana/grafana:11.2.2
-    ports: ["3000:3000"]
+    container_name: dtp-grafana
+    ports:
+      - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
-    depends_on: [prometheus]
+    depends_on:
+      - prometheus
+    networks:
+      - dtp_network
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.111.0
+    container_name: dtp-otel-collector
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
-    ports: ["4317:4317", "4318:4318"]
+    ports:
+      - "4317:4317"
+      - "4318:4318"
     volumes:
       - ./observability/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
+    networks:
+      - dtp_network
+
+# ---------------------------------------------------------------------------
+# Named Volumes & Networks
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    name: dtp_postgres_data
+  redis_data:
+    name: dtp_redis_data
+
+networks:
+  dtp_network:
+    name: dtp_network
+    driver: bridge
