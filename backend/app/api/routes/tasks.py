@@ -8,7 +8,7 @@ from app.api.dependencies import CurrentUser
 from app.db.database import get_db
 from app.db.models.task import TaskPriority, TaskStatus
 from app.schemas.task import TaskCreate, TaskListResponse, TaskResponse
-from app.services.task_service import create_task, get_owned_task, list_tasks
+from app.services.task_service import cancel_task, create_task, get_owned_task, list_tasks
 
 router = APIRouter(prefix="/v1/tasks", tags=["tasks"])
 DbSession = Annotated[Session, Depends(get_db)]
@@ -35,3 +35,9 @@ def list_all(
 @router.get("/{task_id}", response_model=TaskResponse)
 def get_one(task_id: UUID, current_user: CurrentUser, db: DbSession) -> TaskResponse:
     return get_owned_task(db, current_user, task_id)
+
+
+@router.post("/{task_id}/cancel", response_model=TaskResponse)
+def cancel(task_id: UUID, current_user: CurrentUser, db: DbSession) -> TaskResponse:
+    """Cancel a CREATED or QUEUED task."""
+    return cancel_task(db, current_user, task_id)

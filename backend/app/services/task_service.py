@@ -108,3 +108,22 @@ def list_tasks(
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     tasks = list(db.scalars(query.order_by(Task.created_at.desc()).offset((page - 1) * page_size).limit(page_size)))
     return tasks, total
+
+
+def cancel_task(db: Session, owner: User, task_id: UUID) -> Task:
+    """Cancel a CREATED or QUEUED task."""
+    task = get_owned_task(db, owner, task_id)
+    if task.status not in (TaskStatus.CREATED, TaskStatus.QUEUED):
+        raise APIError(
+            status_code=409,
+            code="invalid_state_transition",
+            message=f"Cannot cancel task in '{task.status.value}' state. Only CREATED or QUEUED tasks can be cancelled.",
+        )
+    now = _now_utc()
+    task.status = TaskStatus.CANCELLED
+    task.finished_at = now
+    task.error_message = "Task cancelled by user"
+    db.commit()
+    db.refresh(task)
+    log_event(logger, logging.INFO, "task_cancelled", "Task cancelled by user", service="api", task_id=task.id)
+    return task

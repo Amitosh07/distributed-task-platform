@@ -83,14 +83,18 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       TASK_LEASE_SECONDS: ${TASK_LEASE_SECONDS:-10.0}
-      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-2.0}
-      RECOVERY_INTERVAL_SECONDS: ${RECOVERY_INTERVAL_SECONDS:-5.0}
       WORKER_STALE_THRESHOLD_SECONDS: ${WORKER_STALE_THRESHOLD_SECONDS:-10.0}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import sys; sys.exit(0)'"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     networks:
       - dtp_network
 
@@ -109,7 +113,7 @@ services:
     networks:
       - dtp_network
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/healthz"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1/healthz"]
       interval: 10s
       timeout: 3s
       retries: 3

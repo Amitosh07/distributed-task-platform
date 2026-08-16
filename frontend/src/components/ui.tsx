@@ -1,8 +1,1 @@
-import type { ReactNode } from 'react'
-export const statusClass = (status: string) => ({ SUCCESS: 'bg-emerald-100 text-emerald-800', ACTIVE: 'bg-emerald-100 text-emerald-800', RUNNING: 'bg-sky-100 text-sky-800', QUEUED: 'bg-amber-100 text-amber-800', RETRY_WAIT: 'bg-amber-100 text-amber-800', FAILED: 'bg-rose-100 text-rose-800', DEAD_LETTER: 'bg-rose-100 text-rose-800', STALE: 'bg-rose-100 text-rose-800', STOPPED: 'bg-slate-200 text-slate-700', PENDING: 'bg-slate-100 text-slate-700', SKIPPED: 'bg-slate-200 text-slate-600' }[status] || 'bg-slate-100 text-slate-700')
-export function Badge({ status }: { status: string }) { return <span className={`inline-flex rounded px-2 py-0.5 text-xs font-bold tracking-wide ${statusClass(status)}`}>{status.replace('_', ' ')}</span> }
-export function Panel({ children, className = '' }: { children: ReactNode; className?: string }) { return <section className={`rounded-lg border border-slate-200 bg-white p-5 shadow-sm ${className}`}>{children}</section> }
-export function State({ children }: { children: ReactNode }) { return <div className="py-12 text-center text-sm text-slate-500">{children}</div> }
-export function Metric({ label, value, tone = 'text-slate-950' }: { label: string; value: number; tone?: string }) { return <Panel><p className="text-xs font-semibold tracking-widest text-slate-500">{label}</p><p className={`mt-2 text-3xl font-bold ${tone}`}>{value}</p></Panel> }
-export const formatDate = (date: string | null) => date ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'medium' }).format(new Date(date)) : '—'
-export const age = (date: string) => { const seconds = Math.max(0, (Date.now() - new Date(date).getTime()) / 1000); return seconds < 60 ? `${seconds.toFixed(1)}s ago` : `${Math.floor(seconds / 60)}m ago` }
+export * from './ui/index'

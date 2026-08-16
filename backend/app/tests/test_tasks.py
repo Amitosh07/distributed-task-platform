@@ -51,3 +51,22 @@ def test_task_pagination_and_filters(client):
     assert len(client.get("/v1/tasks?status=QUEUED", headers=auth_headers(token)).json()["items"]) == 2
     assert client.get("/v1/tasks?priority=HIGH", headers=auth_headers(token)).json()["items"][0]["priority"] == "HIGH"
     assert client.get("/v1/tasks?type=http_check", headers=auth_headers(token)).json()["items"][0]["type"] == "http_check"
+
+
+def test_task_cancellation(client):
+    token = register_and_token(client)
+    project_id = create_project(client, token)
+    res = create_task(client, token, project_id)
+    task_id = res.json()["id"]
+    assert res.json()["status"] == "QUEUED"
+
+    # Cancel the QUEUED task
+    cancel_res = client.post(f"/v1/tasks/{task_id}/cancel", headers=auth_headers(token))
+    assert cancel_res.status_code == 200
+    assert cancel_res.json()["status"] == "CANCELLED"
+    assert cancel_res.json()["finished_at"] is not None
+
+    # Trying to cancel an already CANCELLED task should be rejected (409 Conflict)
+    cancel_again = client.post(f"/v1/tasks/{task_id}/cancel", headers=auth_headers(token))
+    assert cancel_again.status_code == 409
+    assert cancel_again.json()["error"]["code"] == "invalid_state_transition"
