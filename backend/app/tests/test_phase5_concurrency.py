@@ -11,6 +11,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from uuid import UUID
 import pytest
+from sqlalchemy import select
 
 from app.db.database import SessionLocal
 from app.db.models.task import Task, TaskStatus

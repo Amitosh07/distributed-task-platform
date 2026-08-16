@@ -281,10 +281,15 @@ class TestConcurrentExecution:
     """Tests using real subprocess workers to demonstrate process-level parallelism."""
 
     def test_two_workers_process_tasks_concurrently(self):
-        """Wall-clock time with 2 workers < sequential time for 4 tasks × 0.5s.
+        """Two workers execute tasks in parallel, demonstrating overlapping execution.
 
-        Sequential: 4 × 0.5s ≈ 2.0s
-        With 2 workers: ≈ 1.0s + overhead (we accept up to 1.8s)
+        We submit 4 sleep tasks (0.5s each) and start 2 worker processes.
+        Rather than relying exclusively on brittle wall-clock thresholds which are
+        susceptible to subprocess startup and Python VM import delays on shared CI runners,
+        we verify genuine distributed concurrency by asserting that at least one pair of
+        tasks executed by different workers has overlapping [started_at, finished_at]
+        execution intervals:
+            max(start_a, start_b) < min(finish_a, finish_b)
         """
         # Create 4 sleep tasks (0.5s each).
         task_ids = []
@@ -296,7 +301,6 @@ class TestConcurrentExecution:
         # Start 2 worker processes.
         workers = [_start_worker("p3-worker-1"), _start_worker("p3-worker-2")]
 
-        start = time.monotonic()
         try:
             # Wait for all tasks to reach a terminal state.
             for tid in task_ids:
@@ -304,21 +308,42 @@ class TestConcurrentExecution:
         finally:
             logs = [_stop_worker(w) for w in workers]
 
-        elapsed = time.monotonic() - start
-
         # All tasks must have succeeded.
+        tasks = []
         for tid in task_ids:
             task = _load_task(tid)
             assert task.status == TaskStatus.SUCCESS, (
                 f"Task {tid} expected SUCCESS, got {task.status}"
             )
+            tasks.append(task)
 
-        # Concurrent execution must be faster than sequential.
-        sequential_time = 4 * 0.5  # 2.0s minimum
-        assert elapsed < sequential_time * 1.5, (
-            f"Expected concurrent wall-time < {sequential_time * 1.5:.1f}s "
-            f"(sequential ≈ {sequential_time}s), but got {elapsed:.2f}s. "
-            f"This suggests workers may not be running concurrently."
+        # Check worker distribution: both workers processed work
+        worker_task_map: dict[str, list[Task]] = {}
+        for t in tasks:
+            assert t.started_at is not None and t.finished_at is not None
+            worker_task_map.setdefault(t.worker_id, []).append(t)
+
+        assert len(worker_task_map) >= 2, (
+            f"Expected tasks to be processed by at least 2 distinct workers, got: {list(worker_task_map.keys())}"
+        )
+
+        # Check for overlapping execution intervals across different workers:
+        # Two tasks overlap if: max(start_a, start_b) < min(finish_a, finish_b)
+        has_overlap = False
+        for i, t_a in enumerate(tasks):
+            for j, t_b in enumerate(tasks):
+                if i < j and t_a.worker_id != t_b.worker_id:
+                    overlap_start = max(t_a.started_at, t_b.started_at)
+                    overlap_end = min(t_a.finished_at, t_b.finished_at)
+                    if overlap_start < overlap_end:
+                        has_overlap = True
+                        break
+            if has_overlap:
+                break
+
+        assert has_overlap, (
+            "Expected at least one pair of tasks executed by different workers to have "
+            f"overlapping execution intervals. Task timestamps: {[(t.id, t.worker_id, t.started_at, t.finished_at) for t in tasks]}"
         )
 
     def test_tasks_distributed_across_two_workers(self):
