@@ -1,6 +1,74 @@
 # Distributed Task Execution & Workflow Platform
 
-Phase 6 adds a React + TypeScript operations dashboard on top of the Phase 5 workflow engine. It provides authenticated project-scoped task views, worker heartbeat health, workflow definitions, and live workflow-run state through polling.
+A production-quality distributed task execution and workflow orchestration platform built with **FastAPI**, **PostgreSQL**, **Redis**, and **React**. Phases 1–8 complete.
+
+---
+
+## Phase 8 — Load Testing, Fault Injection & Benchmarking
+
+Phase 8 adds a reproducible benchmarking and fault-injection framework to measure and validate the distributed system's behavior under load.
+
+### Quick benchmark commands
+
+```powershell
+cd backend
+.\.venv\Scripts\Activate.ps1
+
+# Set environment
+$env:DATABASE_URL = "postgresql+psycopg://<user>:<password>@localhost:5432/workflow_platform"
+$env:REDIS_URL    = "redis://localhost:6379/0"
+
+# Worker scaling sweep (1, 2, 3 workers × 100 tasks)
+python benchmarks/load_test.py --tasks 100 --worker-counts 1,2,3 --seconds 1
+
+# Single throughput benchmark (3 workers)
+python benchmarks/load_test.py --tasks 100 --workers 3
+
+# Fault injection
+python benchmarks/fault_injection.py worker-crash
+python benchmarks/fault_injection.py timeout-injection
+python benchmarks/fault_injection.py redis-outage
+python benchmarks/fault_injection.py retry-storm
+
+# Workflow DAG scaling (linear / diamond / fan-out × 1,2,3 workers)
+python benchmarks/workflow_scaling.py --dag all --workers 1,2,3 --seconds 0.5
+python benchmarks/workflow_scaling.py --test-failure-policies
+
+# Idempotency & concurrency stress
+python benchmarks/idempotency_stress.py --concurrency 20 --rounds 2
+```
+
+All results are saved to `benchmarks/results/*.json`. See [docs/benchmarks.md](docs/benchmarks.md) for the full benchmark report, methodology, and result tables.
+
+### Phase 8 test commands
+
+```powershell
+# Phase 8 unit tests (no DB/Redis required — always safe for CI)
+cd backend
+.\.venv\Scripts\pytest.exe -v app/tests/test_phase8_benchmarks.py
+
+# Phase 8 integration tests (requires TEST_DATABASE_URL + TEST_REDIS_URL)
+$env:TEST_DATABASE_URL = "postgresql+psycopg://<user>:<password>@localhost:5432/workflow_platform_test"
+$env:TEST_REDIS_URL    = "redis://localhost:6379/1"
+.\.venv\Scripts\pytest.exe -v app/tests/test_phase8_fault_injection.py app/tests/test_phase8_scaling.py
+```
+
+### Benchmark files created
+
+| File | Purpose |
+|---|---|
+| `benchmarks/lib/common.py` | Shared helpers: DB fixtures, worker management, latency stats, JSON result saving |
+| `benchmarks/load_test.py` | Unified load test with CLI (throughput, scaling sweep, p50/p95/p99) |
+| `benchmarks/fault_injection.py` | Worker crash / timeout / Redis outage / retry storm |
+| `benchmarks/workflow_scaling.py` | DAG shapes × worker counts, failure policies |
+| `benchmarks/idempotency_stress.py` | Sequential/concurrent duplicates, dispatch stress |
+| `benchmarks/results/` | Machine-readable JSON result artifacts |
+| `backend/app/tests/test_phase8_benchmarks.py` | Unit tests (no DB) — latency stats, result schema |
+| `backend/app/tests/test_phase8_fault_injection.py` | Integration fault tests (DB+Redis required) |
+| `backend/app/tests/test_phase8_scaling.py` | Integration scaling/concurrency tests |
+| `docs/benchmarks.md` | Full benchmark report with methodology and result tables |
+
+---
 
 ## Dashboard (Phase 6)
 
@@ -51,7 +119,7 @@ docker compose up -d prometheus grafana otel-collector
 ```
 
 - Prometheus: `http://localhost:9090` (target: `host.docker.internal:8000/metrics`)
-- Grafana: `http://localhost:3000` (`admin` / `admin`, change this outside local development)
+- Grafana: `http://localhost:3000` (`admin` / `admin`, change this outside local development) — Phase 8 dashboard has 16 panels
 - OTLP gRPC receiver: `localhost:4317`; set `OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317` in `backend/.env` to export traces to the local collector.
 
 Prometheus/Grafana/OTLP are intentionally non-critical: if they are stopped, persistence, queueing, and workers continue. See [ADR-011](docs/adr/ADR-011-phase7-observability.md) for the metric-cardinality policy and architecture decision.
@@ -173,20 +241,38 @@ cd backend
 .\.venv\Scripts\pytest.exe -v
 ```
 
+### Run Phase 8 unit tests only (no DB required):
+```powershell
+cd backend
+.\.venv\Scripts\pytest.exe -v app/tests/test_phase8_benchmarks.py
+```
+
 ### Run Phase 5 tests only:
 ```powershell
 cd backend
 .\.venv\Scripts\pytest.exe -v app/tests/test_phase5_dag_validation.py app/tests/test_phase5_workflow_api.py app/tests/test_phase5_workflow_execution.py app/tests/test_phase5_failure_policy.py app/tests/test_phase5_concurrency.py
 ```
 
-## Running the Workflow DAG Benchmark
+## Running Benchmarks (Phase 8)
 
-Measures sequential vs parallel branch speedup with real multi-worker processes:
+See [docs/benchmarks.md](docs/benchmarks.md) for the complete benchmark report.
 
+### Scaling benchmark:
 ```powershell
-python benchmarks/workflow_dag_benchmark.py
+python benchmarks/load_test.py --tasks 100 --worker-counts 1,2,3 --seconds 1
+```
+
+### Workflow DAG benchmark:
+```powershell
+python benchmarks/workflow_scaling.py --dag all --workers 1,2,3 --seconds 0.5
+```
+
+### Fault injection:
+```powershell
+python benchmarks/fault_injection.py worker-crash
+python benchmarks/fault_injection.py timeout-injection
+python benchmarks/fault_injection.py redis-outage
+python benchmarks/fault_injection.py retry-storm
 ```
 
 ---
-
-The React dashboard, Prometheus/Grafana metrics, OpenTelemetry tracing, Docker Compose packaging, and cloud deployment remain planned future phases.

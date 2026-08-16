@@ -1,0 +1,137 @@
+{
+  "benchmark": "worker_scaling",
+  "timestamp": "2026-08-16T14:39:26.175127+00:00",
+  "runs": [
+    {
+      "label": "1w",
+      "worker_count": 1,
+      "task_count": 100,
+      "task_type": "sleep",
+      "task_seconds": 1.0,
+      "concurrency": 1,
+      "submission_rate_tasks_per_sec": 725.699,
+      "wall_time_seconds": 103.186,
+      "throughput_tasks_per_sec": 0.969,
+      "success_count": 100,
+      "failure_count": 0,
+      "timeout_count": 0,
+      "retried_count": 0,
+      "queue_depth_initial": 0,
+      "queue_depth_max_observed": 99,
+      "queue_depth_final": 0,
+      "latency_execution_ms": {
+        "min": 1004.52,
+        "avg": 1009.18,
+        "p50": 1008.61,
+        "p95": 1013.71,
+        "p99": 1028.82,
+        "max": 1028.94
+      },
+      "latency_e2e_ms": {
+        "min": 1087.87,
+        "avg": 52186.3,
+        "p50": 52137.58,
+        "p95": 99102.84,
+        "p99": 103292.91,
+        "max": 103303.32
+      },
+      "latency_queue_wait_ms": {
+        "min": 73.45,
+        "avg": 51177.12,
+        "p50": 51124.73,
+        "p95": 98094.3,
+        "p99": 102283.72,
+        "max": 102294.13
+      }
+    },
+    {
+      "label": "2w",
+      "worker_count": 2,
+      "task_count": 100,
+      "task_type": "sleep",
+      "task_seconds": 1.0,
+      "concurrency": 1,
+      "submission_rate_tasks_per_sec": 999.555,
+      "wall_time_seconds": 51.61,
+      "throughput_tasks_per_sec": 1.938,
+      "success_count": 100,
+      "failure_count": 0,
+      "timeout_count": 0,
+      "retried_count": 0,
+      "queue_depth_initial": 0,
+      "queue_depth_max_observed": 98,
+      "queue_depth_final": 0,
+      "latency_execution_ms": {
+        "min": 1004.58,
+        "avg": 1008.64,
+        "p50": 1008.88,
+        "p95": 1011.36,
+        "p99": 1016.28,
+        "max": 1016.29
+      },
+      "latency_e2e_ms": {
+        "min": 1051.66,
+        "avg": 26286.05,
+        "p50": 26261.23,
+        "p95": 49490.13,
+        "p99": 51558.25,
+        "max": 51558.26
+      },
+      "latency_queue_wait_ms": {
+        "min": 35.58,
+        "avg": 25277.41,
+        "p50": 25254.4,
+        "p95": 48479.85,
+        "p99": 50547.26,
+        "max": 50547.26
+      }
+    },
+    {
+      "label": "3w",
+      "worker_count": 3,
+      "task_count": 100,
+      "task_type": "sleep",
+      "task_seconds": 1.0,
+      "concurrency": 1,
+      "submission_rate_tasks_per_sec": 883.214,
+      "wall_time_seconds": 35.42,
+      "throughput_tasks_per_sec": 2.823,
+      "success_count": 100,
+      "failure_count": 0,
+      "timeout_count": 0,
+      "retried_count": 0,
+      "queue_depth_initial": 0,
+      "queue_depth_max_observed": 97,
+      "queue_depth_final": 0,
+      "latency_execution_ms": {
+        "min": 1004.96,
+        "avg": 1009.87,
+        "p50": 1009.65,
+        "p95": 1013.83,
+        "p99": 1022.08,
+        "max": 1022.09
+      },
+      "latency_e2e_ms": {
+        "min": 1065.97,
+        "avg": 17814.69,
+        "p50": 17613.13,
+        "p95": 33269.13,
+        "p99": 35323.01,
+        "max": 35333.22
+      },
+      "latency_queue_wait_ms": {
+        "min": 44.04,
+        "avg": 16804.82,
+        "p50": 16606.92,
+        "p95": 32259.91,
+        "p99": 34313.76,
+        "max": 34323.98
+      }
+    }
+  ],
+  "speedup": {
+    "1": 1.0,
+    "2": 1.999,
+    "3": 2.913
+  }
+}

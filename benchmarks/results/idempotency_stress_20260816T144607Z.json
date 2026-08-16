@@ -1,0 +1,53 @@
+{
+  "benchmark": "idempotency_stress",
+  "timestamp": "2026-08-16T14:46:07.276122+00:00",
+  "concurrency": 20,
+  "rounds": 2,
+  "results": [
+    {
+      "test": "sequential_idempotency",
+      "n_duplicates": 10,
+      "db_record_count": 1,
+      "unique_ids_returned": 1,
+      "was_created_once": 1,
+      "passed": true
+    },
+    {
+      "test": "concurrent_idempotency",
+      "n_threads": 20,
+      "db_record_count": 1,
+      "created_count": 1,
+      "unique_ids_returned": 1,
+      "passed": true
+    },
+    {
+      "test": "concurrent_bulk_submission",
+      "n_threads": 20,
+      "submitted_count": 20,
+      "error_count": 0,
+      "succeeded": 20,
+      "passed": true,
+      "errors": []
+    },
+    {
+      "test": "duplicate_dispatch_stress",
+      "n_runs": 20,
+      "worker_count": 3,
+      "completed_runs": 36,
+      "failed_runs": 0,
+      "duplicate_dispatch_count": 0,
+      "passed": false
+    },
+    {
+      "test": "duplicate_dispatch_stress",
+      "n_runs": 20,
+      "worker_count": 3,
+      "completed_runs": 35,
+      "failed_runs": 0,
+      "duplicate_dispatch_count": 0,
+      "passed": false
+    }
+  ],
+  "passed": 3,
+  "total": 5
+}

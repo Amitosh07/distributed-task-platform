@@ -1,0 +1,11 @@
+{
+  "benchmark": "timeout_injection",
+  "timestamp": "2026-08-16T14:49:15.792307+00:00",
+  "task_timeout_s": 3,
+  "task_sleep_s": 30.0,
+  "max_retries": 2,
+  "wall_time_s": 10.058,
+  "final_status": "FAILED",
+  "attempt_count": 3,
+  "error_message": "Execution failed: TaskTimeoutError: Task exceeded execution timeout of 3 seconds"
+}

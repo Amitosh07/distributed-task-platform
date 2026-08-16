@@ -1,0 +1,13 @@
+{
+  "benchmark": "retry_storm",
+  "timestamp": "2026-08-16T14:50:33.888406+00:00",
+  "wall_time_s": 18.246,
+  "total_tasks": 30,
+  "succeeded": 25,
+  "failed_final": 5,
+  "retried_any": 5,
+  "total_attempts": 35,
+  "profile1_succeed": 20,
+  "profile2_failed": 5,
+  "profile3_succeed": 5
+}

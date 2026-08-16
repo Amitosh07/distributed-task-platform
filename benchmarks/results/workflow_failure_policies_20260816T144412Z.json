@@ -1,0 +1,27 @@
+{
+  "benchmark": "workflow_failure_policies",
+  "timestamp": "2026-08-16T14:44:12.997005+00:00",
+  "runs": [
+    {
+      "policy": "FAIL_FAST",
+      "wall_time_s": 0.308,
+      "status": "FAILED",
+      "node_states": {
+        "A": "SUCCESS",
+        "C": "RUNNING",
+        "B": "FAILED",
+        "D": "SKIPPED"
+      }
+    },
+    {
+      "policy": "CONTINUE",
+      "wall_time_s": 0.824,
+      "status": "FAILED",
+      "node_states": {
+        "B": "FAILED",
+        "A": "SUCCESS",
+        "C": "SUCCESS"
+      }
+    }
+  ]
+}

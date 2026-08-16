@@ -1,0 +1,70 @@
+{
+  "benchmark": "workflow_dag_scaling",
+  "timestamp": "2026-08-16T14:44:08.711651+00:00",
+  "task_seconds": 0.5,
+  "runs": [
+    {
+      "dag": "linear",
+      "worker_count": 1,
+      "wall_time_s": 2.929,
+      "status": "SUCCESS",
+      "task_seconds": 0.5
+    },
+    {
+      "dag": "linear",
+      "worker_count": 2,
+      "wall_time_s": 2.918,
+      "status": "SUCCESS",
+      "task_seconds": 0.5
+    },
+    {
+      "dag": "linear",
+      "worker_count": 3,
+      "wall_time_s": 3.029,
+      "status": "SUCCESS",
+      "task_seconds": 0.5
+    },
+    {
+      "dag": "diamond",
+      "worker_count": 1,
+      "wall_time_s": 2.295,
+      "status": "SUCCESS",
+      "task_seconds": 0.5
+    },
+    {
+      "dag": "diamond",
+      "worker_count": 2,
+      "wall_time_s": 1.776,
+      "status": "SUCCESS",
+      "task_seconds": 0.5
+    },
+    {
+      "dag": "diamond",
+      "worker_count": 3,
+      "wall_time_s": 1.781,
+      "status": "SUCCESS",
+      "task_seconds": 0.5
+    },
+    {
+      "dag": "fan_out",
+      "worker_count": 1,
+      "wall_time_s": 2.826,
+      "status": "SUCCESS",
+      "task_seconds": 0.5
+    },
+    {
+      "dag": "fan_out",
+      "worker_count": 2,
+      "wall_time_s": 2.285,
+      "status": "SUCCESS",
+      "task_seconds": 0.5
+    },
+    {
+      "dag": "fan_out",
+      "worker_count": 3,
+      "wall_time_s": 1.775,
+      "status": "SUCCESS",
+      "task_seconds": 0.5
+    }
+  ]
+}

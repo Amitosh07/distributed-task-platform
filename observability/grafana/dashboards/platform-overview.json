@@ -1,1 +1,183 @@
-{"annotations":{"list":[]},"editable":true,"panels":[{"type":"stat","title":"Tasks submitted","targets":[{"expr":"sum(task_submissions_total)"}]},{"type":"stat","title":"Tasks running","targets":[{"expr":"sum(tasks_running)"}]},{"type":"timeseries","title":"Task throughput","targets":[{"expr":"sum(rate(task_completions_total[5m]))"},{"expr":"sum(rate(task_failures_total[5m]))"}]},{"type":"timeseries","title":"Queue depth","targets":[{"expr":"queue_depth"}]},{"type":"timeseries","title":"Task execution p95","targets":[{"expr":"histogram_quantile(0.95, sum(rate(task_execution_duration_seconds_bucket[5m])) by (le))"}]},{"type":"timeseries","title":"Request p95","targets":[{"expr":"histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))"}]},{"type":"timeseries","title":"Retries, timeouts, recoveries","targets":[{"expr":"sum(rate(task_retries_total[5m]))"},{"expr":"sum(rate(task_timeouts_total[5m]))"},{"expr":"sum(rate(worker_recoveries_total[5m]))"}]},{"type":"timeseries","title":"Workflow outcomes","targets":[{"expr":"sum(rate(workflow_runs_completed_total[5m])) by (status)"}]}],"schemaVersion":39,"title":"Distributed Task Platform","version":1}
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "schemaVersion": 39,
+  "title": "Distributed Task Platform — Phase 8 Benchmark",
+  "version": 2,
+  "uid": "dtp-phase8",
+  "refresh": "10s",
+  "time": {"from": "now-30m", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Tasks Submitted (total)",
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+      "targets": [{"expr": "sum(task_submissions_total)", "legendFormat": "Total Submitted"}],
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Tasks Running",
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0},
+      "targets": [{"expr": "sum(tasks_running)", "legendFormat": "Running"}],
+      "options": {"colorMode": "value", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "red", "value": 20}]}}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Queue Depth",
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0},
+      "targets": [{"expr": "queue_depth", "legendFormat": "Queue Depth"}],
+      "options": {"colorMode": "value", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 50}, {"color": "red", "value": 200}]}}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Retry Rate (5m avg)",
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0},
+      "targets": [{"expr": "sum(rate(task_retries_total[5m]))", "legendFormat": "Retries/s"}],
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Worker Recoveries (total)",
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 0},
+      "targets": [{"expr": "sum(worker_recoveries_total)", "legendFormat": "Recoveries"}],
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Timeout Rate (5m avg)",
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 0},
+      "targets": [{"expr": "sum(rate(task_timeouts_total[5m]))", "legendFormat": "Timeouts/s"}],
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Task Throughput — Completions & Failures per Second",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "targets": [
+        {"expr": "sum(rate(task_completions_total{status='SUCCESS'}[1m]))", "legendFormat": "Success/s"},
+        {"expr": "sum(rate(task_failures_total[1m]))", "legendFormat": "Failure/s"},
+        {"expr": "sum(rate(task_retries_total[1m]))", "legendFormat": "Retry/s"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}},
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Queue Depth Over Time",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "targets": [{"expr": "queue_depth", "legendFormat": "Redis Queue Depth"}],
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}},
+      "options": {"tooltip": {"mode": "single"}}
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Task Execution Latency — p50 / p95 / p99",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(task_execution_duration_seconds_bucket[2m])) by (le))", "legendFormat": "p50 execution"},
+        {"expr": "histogram_quantile(0.95, sum(rate(task_execution_duration_seconds_bucket[2m])) by (le))", "legendFormat": "p95 execution"},
+        {"expr": "histogram_quantile(0.99, sum(rate(task_execution_duration_seconds_bucket[2m])) by (le))", "legendFormat": "p99 execution"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "options": {"tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Queue Wait Latency — p50 / p95 / p99",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(task_queue_wait_duration_seconds_bucket[2m])) by (le))", "legendFormat": "p50 queue wait"},
+        {"expr": "histogram_quantile(0.95, sum(rate(task_queue_wait_duration_seconds_bucket[2m])) by (le))", "legendFormat": "p95 queue wait"},
+        {"expr": "histogram_quantile(0.99, sum(rate(task_queue_wait_duration_seconds_bucket[2m])) by (le))", "legendFormat": "p99 queue wait"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "options": {"tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "HTTP API Latency p95",
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 20},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[2m])) by (le, route))", "legendFormat": "p95 {{route}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "options": {"tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Reliability Events — Retries / Timeouts / Recoveries",
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 20},
+      "targets": [
+        {"expr": "sum(rate(task_retries_total[2m]))", "legendFormat": "Retries/s"},
+        {"expr": "sum(rate(task_timeouts_total[2m]))", "legendFormat": "Timeouts/s"},
+        {"expr": "sum(rate(worker_recoveries_total[2m]))", "legendFormat": "Recoveries/s"},
+        {"expr": "sum(rate(stale_workers_detected_total[2m]))", "legendFormat": "Stale workers/s"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}},
+      "options": {"tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "Workflow Outcomes",
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 26},
+      "targets": [
+        {"expr": "sum(rate(workflow_runs_completed_total[2m])) by (status)", "legendFormat": "{{status}}"},
+        {"expr": "sum(rate(workflow_runs_started_total[2m]))", "legendFormat": "started/s"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}},
+      "options": {"tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Worker Heartbeats & Claims",
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 26},
+      "targets": [
+        {"expr": "sum(rate(worker_heartbeats_total[1m]))", "legendFormat": "Heartbeats/s"},
+        {"expr": "sum(rate(worker_tasks_claimed_total[1m]))", "legendFormat": "Claims/s"},
+        {"expr": "sum(rate(worker_tasks_completed_total[1m]))", "legendFormat": "Completions/s"},
+        {"expr": "sum(rate(worker_tasks_failed_total[1m]))", "legendFormat": "Failures/s"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}},
+      "options": {"tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 50,
+      "type": "timeseries",
+      "title": "Tasks Running by Type",
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 32},
+      "targets": [
+        {"expr": "tasks_running", "legendFormat": "{{task_type}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}},
+      "options": {"tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "Task Submissions Rate by Type",
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 32},
+      "targets": [
+        {"expr": "sum(rate(task_submissions_total[1m])) by (task_type)", "legendFormat": "{{task_type}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}},
+      "options": {"tooltip": {"mode": "multi"}}
+    }
+  ]
+}

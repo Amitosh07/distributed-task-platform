@@ -1,0 +1,9 @@
+{
+  "benchmark": "redis_outage",
+  "timestamp": "2026-08-16T14:51:10.864673+00:00",
+  "tasks_committed_to_postgres": 5,
+  "postgres_state_intact": true,
+  "tasks_completed_after_restore": 5,
+  "tasks_failed": 0,
+  "notes": "PostgreSQL durability verified. Tasks committed without Redis publish remain QUEUED and can be re-published and executed after Redis is restored. Full Redis process restart test requires OS-level control (docker compose stop redis)."
+}
