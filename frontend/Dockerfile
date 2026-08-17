@@ -5,11 +5,11 @@ FROM node:22-alpine AS build
 
 WORKDIR /app
 
-# Enable pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Enable pnpm (version 9 matches lockfile version 9.0 and CI)
+RUN corepack enable && corepack prepare pnpm@9 --activate
 
 # Install dependencies with layer caching
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml* ./
+COPY package.json pnpm-lock.yaml .npmrc ./
 RUN pnpm install --frozen-lockfile
 
 # Copy source code and build config
